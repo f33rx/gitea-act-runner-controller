@@ -1,0 +1,85 @@
+# Listener Deployment + RBAC. The listener polls each GiteaRunnerSet's org queued-jobs
+# count and drives the matching EphemeralRunnerSet's replicas (ADR 0007). It is
+# read-only to Gitea (mounts only a read credential) and least-privileged in the
+# cluster: it reads GiteaRunnerSets/Secrets and writes only EphemeralRunnerSet
+# spec/status. It never registers, deletes, or mutates runners (that is the manager's
+# job with the write credential).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitea-listener
+  namespace: gitea-actions-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gitea-listener
+rules:
+  - apiGroups: ["giteaactions.blackrabbit.dev"]
+    resources: ["gitearunnersets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["giteaactions.blackrabbit.dev"]
+    resources: ["ephemeralrunnersets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["giteaactions.blackrabbit.dev"]
+    resources: ["ephemeralrunnersets/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gitea-listener
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gitea-listener
+subjects:
+  - kind: ServiceAccount
+    name: gitea-listener
+    namespace: gitea-actions-controller
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea-listener
+  namespace: gitea-actions-controller
+  labels:
+    app: gitea-listener
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea-listener
+  template:
+    metadata:
+      labels:
+        app: gitea-listener
+    spec:
+      serviceAccountName: gitea-listener
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: listener
+          image: gitea-runner-controller:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/listener"]
+          args:
+            - "--poll-interval=10s"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
