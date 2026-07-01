@@ -43,9 +43,25 @@ spec:
             description: GiteaRunnerSetSpec defines the desired state of GiteaRunnerSet.
             properties:
               giteaConfigSecretRef:
-                $ref: '#/definitions/k8s.io~1api~1core~1v1~0SecretKeySelector'
                 description: GiteaConfigSecretRef is a reference to the Secret containing
-                  the Gitea operator credential.
+                  the Gitea operator credential (a SecretKeySelector).
+                properties:
+                  key:
+                    description: The key of the secret to select from.
+                    type: string
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                  optional:
+                    description: Specify whether the Secret or its key must be defined.
+                    type: boolean
+                required:
+                - key
+                type: object
+                x-kubernetes-map-type: atomic
               giteaConfigUrl:
                 description: GiteaConfigUrl is the URL of the Gitea instance.
                 type: string
@@ -75,15 +91,19 @@ spec:
                 - instance
                 type: string
               template:
-                $ref: '#/definitions/k8s.io~1api~1core~1v1~0PodTemplateSpec'
-                description: Template is the pod template spec for the runner pods.
+                description: |-
+                  Template is the pod template spec for the runner pods.
+                  A full corev1.PodTemplateSpec; its structure is preserved as-is rather
+                  than fully schema-validated (embedded core types cannot be expressed as
+                  a structural CRD schema without $ref, which the API server rejects).
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
             required:
             - giteaConfigSecretRef
             - giteaConfigUrl
             - labels
             - orgName
             - runnerScope
-            - template
             type: object
           status:
             description: GiteaRunnerSetStatus defines the observed state of GiteaRunnerSet.

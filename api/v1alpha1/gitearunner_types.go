@@ -46,7 +46,8 @@ type GiteaRunnerSetSpec struct {
 	MaxRunners int32 `json:"maxRunners,omitempty"`
 
 	// Template is the pod template spec for the runner pods.
-	Template corev1.PodTemplateSpec `json:"template"`
+	// +optional
+	Template corev1.PodTemplateSpec `json:"template,omitempty"`
 }
 
 // GiteaRunnerSetStatus defines the observed state of GiteaRunnerSet.
