@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/blackrabbit/gitea-act-runner-controller/internal/gitea"
+	"github.com/f33rx/gitea-act-runner-controller/internal/gitea"
 )
 
 // Verifies ADR 0007 label semantics: all-match (subset) and one count per job.
