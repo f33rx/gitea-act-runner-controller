@@ -1,0 +1,23 @@
+apiVersion: giteaactions.blackrabbit.dev/v1alpha1
+kind: GiteaRunnerSet
+metadata:
+  name: test-set
+  namespace: gitea-runners
+spec:
+  giteaConfigUrl: http://gitea-http.gitea.svc.cluster.local:3000
+  giteaConfigSecretRef:
+    name: gitea-runner-creds
+    key: token
+  runnerScope: org
+  orgName: garc-dev
+  labels:
+    - "ubuntu-latest"
+  minRunners: 0
+  maxRunners: 10
+  template:
+    spec:
+      serviceAccountName: gitea-runner
+      restartPolicy: Never
+      containers:
+      - name: act-runner
+        image: gitea/act_runner:0.2.13
