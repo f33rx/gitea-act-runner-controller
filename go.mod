@@ -1,4 +1,4 @@
-module github.com/blackrabbit/gitea-act-runner-controller
+module github.com/f33rx/gitea-act-runner-controller
 
 go 1.24.13
 

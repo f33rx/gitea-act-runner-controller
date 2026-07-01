@@ -32,8 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	giteaactionsv1alpha1 "github.com/blackrabbit/gitea-act-runner-controller/api/v1alpha1"
-	"github.com/blackrabbit/gitea-act-runner-controller/internal/gitea"
+	giteaactionsv1alpha1 "github.com/f33rx/gitea-act-runner-controller/api/v1alpha1"
+	"github.com/f33rx/gitea-act-runner-controller/internal/gitea"
 )
 
 const (
