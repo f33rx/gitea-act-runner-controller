@@ -1,0 +1,21 @@
+issues:
+  skip-errors: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  disable-all: false
+  fast: true
+  enable:
+    - errcheck
+    - gocritic
+    - gofmt
+    - govet
+    - ineffassign
+    - revive
+    - staticcheck
+    - unused
+
+linters-settings:
+  govet:
+    check-shadowing: true
