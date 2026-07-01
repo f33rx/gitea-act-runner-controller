@@ -1,4 +1,8 @@
-.PHONY: help build test lint security fmt vet clean docker-build docker-load
+.PHONY: help build test lint security fmt vet clean docker-build docker-load manifests generate
+
+# Pin controller-gen so generated output is reproducible.
+CONTROLLER_GEN_VERSION ?= v0.14.0
+CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
 help:
 	@echo "Gitea Actions Runner Controller Makefile"
@@ -6,6 +10,8 @@ help:
 	@echo "Targets:"
 	@echo "  build            - Build the manager binary"
 	@echo "  test             - Run tests"
+	@echo "  manifests        - Regenerate CRDs from the Go types (controller-gen)"
+	@echo "  generate         - Regenerate deepcopy code (controller-gen)"
 	@echo "  lint             - Run all linters"
 	@echo "  security         - Run security checks"
 	@echo "  fmt              - Format code"
@@ -13,6 +19,23 @@ help:
 	@echo "  clean            - Clean build artifacts"
 	@echo "  docker-build     - Build Docker image"
 	@echo "  docker-load      - Load Docker image into kind cluster"
+
+# Regenerate CRDs under config/crd from the +kubebuilder markers on the API types.
+# The API types deliberately avoid embedding core k8s types (corev1.PodTemplateSpec,
+# SecretKeySelector) directly: controller-gen emits a $ref for those, which the API
+# server rejects in a structural CRD schema. A local SecretKeySelector and a
+# RawExtension + PreserveUnknownFields for the pod template keep the generated CRD
+# installable with no post-processing.
+manifests:
+	@echo "Generating CRDs..."
+	@zsh -lc 'cd $$(pwd) && mise exec -- $(CONTROLLER_GEN) crd paths=./api/... output:crd:dir=./config/crd'
+	@echo "manifests: OK (verify no \$$ref remains: grep -r '\''\$$ref'\'' config/crd should be empty)"
+
+# Regenerate the DeepCopy methods (zz_generated.deepcopy.go).
+generate:
+	@echo "Generating deepcopy code..."
+	@zsh -lc 'cd $$(pwd) && mise exec -- $(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths=./api/...'
+	@echo "generate: OK"
 
 # Build the manager binary
 build: fmt vet

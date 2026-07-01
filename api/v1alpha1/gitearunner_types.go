@@ -17,9 +17,25 @@ limitations under the License.
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
+
+// SecretKeySelector selects a key of a Secret. It mirrors the fields of
+// corev1.SecretKeySelector that this operator uses, defined locally so
+// controller-gen produces a fully structural CRD schema. Embedding the core
+// type instead forces a $ref, which the API server rejects in a CRD schema.
+type SecretKeySelector struct {
+	// Name of the referent Secret (same namespace as the GiteaRunnerSet).
+	Name string `json:"name"`
+
+	// Key within the Secret whose value is the credential.
+	Key string `json:"key"`
+
+	// Optional marks whether the Secret or its key must exist.
+	// +optional
+	Optional *bool `json:"optional,omitempty"`
+}
 
 // GiteaRunnerSetSpec defines the desired state of GiteaRunnerSet.
 type GiteaRunnerSetSpec struct {
@@ -27,7 +43,7 @@ type GiteaRunnerSetSpec struct {
 	GiteaConfigUrl string `json:"giteaConfigUrl"`
 
 	// GiteaConfigSecretRef is a reference to the Secret containing the Gitea operator credential.
-	GiteaConfigSecretRef corev1.SecretKeySelector `json:"giteaConfigSecretRef"`
+	GiteaConfigSecretRef SecretKeySelector `json:"giteaConfigSecretRef"`
 
 	// RunnerScope is the scope of the runner: org or instance.
 	// +kubebuilder:validation:Enum=org;instance
@@ -45,9 +61,13 @@ type GiteaRunnerSetSpec struct {
 	// MaxRunners is the maximum number of ephemeral runners to create.
 	MaxRunners int32 `json:"maxRunners,omitempty"`
 
-	// Template is the pod template spec for the runner pods.
+	// Template is the pod template spec for the runner pods (a corev1.PodTemplateSpec).
+	// Held as a RawExtension with preserved unknown fields so controller-gen emits a
+	// structural schema (x-kubernetes-preserve-unknown-fields) rather than a $ref to the
+	// embedded core type. Not consumed yet; optional.
 	// +optional
-	Template corev1.PodTemplateSpec `json:"template,omitempty"`
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Template *runtime.RawExtension `json:"template,omitempty"`
 }
 
 // GiteaRunnerSetStatus defines the observed state of GiteaRunnerSet.

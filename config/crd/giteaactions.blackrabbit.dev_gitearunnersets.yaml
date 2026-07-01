@@ -44,24 +44,23 @@ spec:
             properties:
               giteaConfigSecretRef:
                 description: GiteaConfigSecretRef is a reference to the Secret containing
-                  the Gitea operator credential (a SecretKeySelector).
+                  the Gitea operator credential.
                 properties:
                   key:
-                    description: The key of the secret to select from.
+                    description: Key within the Secret whose value is the credential.
                     type: string
                   name:
-                    default: ""
-                    description: |-
-                      Name of the referent.
-                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    description: Name of the referent Secret (same namespace as the
+                      GiteaRunnerSet).
                     type: string
                   optional:
-                    description: Specify whether the Secret or its key must be defined.
+                    description: Optional marks whether the Secret or its key must
+                      exist.
                     type: boolean
                 required:
                 - key
+                - name
                 type: object
-                x-kubernetes-map-type: atomic
               giteaConfigUrl:
                 description: GiteaConfigUrl is the URL of the Gitea instance.
                 type: string
@@ -92,10 +91,10 @@ spec:
                 type: string
               template:
                 description: |-
-                  Template is the pod template spec for the runner pods.
-                  A full corev1.PodTemplateSpec; its structure is preserved as-is rather
-                  than fully schema-validated (embedded core types cannot be expressed as
-                  a structural CRD schema without $ref, which the API server rejects).
+                  Template is the pod template spec for the runner pods (a corev1.PodTemplateSpec).
+                  Held as a RawExtension with preserved unknown fields so controller-gen emits a
+                  structural schema (x-kubernetes-preserve-unknown-fields) rather than a $ref to the
+                  embedded core type. Not consumed yet; optional.
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
             required:
