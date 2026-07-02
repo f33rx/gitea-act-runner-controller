@@ -110,9 +110,15 @@ jobs:
     steps:
       - run: echo "hello from garc dev runner"
       - run: echo "job=${{ github.job }} sha=${{ github.sha }}"
+      # A short sleep so the ephemeral runner is observably "live" for a beat: a
+      # bare echo completes sub-second and the runner registers, drains, and tears
+      # down before a polling observer (e.g. the e2e harness) can catch scale-up.
+      - run: sleep 20
 YAML
 )
-WF_B64=$(printf '%s' "$WF_CONTENT" | base64)
+# tr -d '\n' keeps the base64 on one line regardless of platform (GNU base64 wraps at 76
+# columns, macOS does not); harmless hygiene for the JSON "content" field.
+WF_B64=$(printf '%s' "$WF_CONTENT" | base64 | tr -d '\n')
 # Write the workflow file (create-or-update). A freshly-created repo can briefly reject a
 # content write even after the branch GET returns 200, so retry on any non-2xx and print
 # the real status code instead of letting `curl -f` exit opaquely (was exit 22 in CI).
