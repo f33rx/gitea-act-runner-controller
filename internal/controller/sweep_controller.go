@@ -168,7 +168,7 @@ func (r *SweepReconciler) sweepOrgRunners(ctx context.Context, giteaURL, org, to
 	logger := log.FromContext(ctx).WithName("sweep")
 
 	client := gitea.NewClient(giteaURL, token)
-	runners, err := client.ListOrgRunners(org)
+	runners, err := client.ListOrgRunners(ctx, org)
 	if err != nil {
 		logger.Error(err, "failed to list org runners", "org", org)
 		return
@@ -217,7 +217,7 @@ func (r *SweepReconciler) sweepOrgRunners(ctx context.Context, giteaURL, org, to
 
 		// Orphaned: no CR claims it.
 		logger.Info("found orphaned ephemeral runner, deregistering", "org", org, "runnerId", runnerRow.ID, "name", runnerRow.Name)
-		statusCode, err := client.DeregisterOrgRunner(org, runnerRow.ID)
+		statusCode, err := client.DeregisterOrgRunner(ctx, org, runnerRow.ID)
 		if err != nil {
 			logger.Error(err, "failed to deregister orphaned runner", "runnerId", runnerRow.ID)
 			continue

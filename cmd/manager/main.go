@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +33,14 @@ import (
 	giteaactionsv1alpha1 "github.com/f33rx/gitea-act-runner-controller/api/v1alpha1"
 	"github.com/f33rx/gitea-act-runner-controller/internal/controller"
 )
+
+// ADR 0009: explicit rather than left to controller-runtime's library defaults, so a
+// future controller-runtime upgrade cannot silently change this manager's shutdown
+// behavior. gracefulShutdownTimeout matches controller-runtime's own current default
+// (30s); lease timing (LeaseDuration/RenewDeadline/RetryPeriod) is left at the
+// library default, which this manager's 10s-poll-driven reconcile load does not
+// warrant overriding.
+const gracefulShutdownTimeout = 30 * time.Second
 
 var (
 	scheme   = runtime.NewScheme()
@@ -69,6 +78,12 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "gitea-actions-controller.blackrabbit.dev",
+		// ADR 0009 Decision 3: release the lease immediately on a graceful SIGTERM
+		// instead of waiting out the full LeaseDuration, so a standby takes over
+		// promptly on planned restarts/upgrades (the common case). A crash still
+		// bounds failover by LeaseDuration, which release-on-cancel cannot help.
+		LeaderElectionReleaseOnCancel: true,
+		GracefulShutdownTimeout:       ptrDuration(gracefulShutdownTimeout),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -113,4 +128,8 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func ptrDuration(d time.Duration) *time.Duration {
+	return &d
 }

@@ -195,7 +195,7 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 
 		// Deregister from Gitea.
 		client := gitea.NewClient(runner.Spec.GiteaConfigURL, token)
-		statusCode, err := client.DeregisterOrgRunner(runner.Spec.OrgName, runner.Status.RunnerID)
+		statusCode, err := client.DeregisterOrgRunner(ctx, runner.Spec.OrgName, runner.Status.RunnerID)
 		if err != nil {
 			log.Error(err, "deregister API call failed")
 			// Requeue on transient errors (network, etc).
