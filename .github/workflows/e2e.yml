@@ -1,0 +1,98 @@
+name: E2E
+
+# End-to-end proof on a real kind cluster: stand up Gitea + the operator, trigger a
+# workflow, and assert the ephemeral-runner lifecycle (scale-up -> job success ->
+# graceful teardown to zero). This is heavier than the unit gates in ci.yml, so it runs
+# on pull requests and pushes to main, and can be dispatched manually.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.24.13"
+  GOTOOLCHAIN: local
+  IMAGE: gitea-runner-controller:latest
+  CLUSTER: garc-dev
+  # Give each phase a generous budget; the ubuntu runner is slower than a laptop and
+  # pulls the Gitea + act_runner images cold.
+  TIMEOUT: "420"
+
+jobs:
+  # Only run when the branch carries Go sources (docs-only slices have no go.mod).
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_go: ${{ steps.check.outputs.has_go }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f go.mod ]; then
+            echo "has_go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  e2e:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      # Build the controller image with plain docker (the Makefile's docker-build chains
+      # `make build`, which uses mise/zsh that do not exist on the runner). The script is
+      # told to skip its own build step and use the image we load here.
+      - name: Build controller image
+        run: docker build -t "${IMAGE}" .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+          wait: 120s
+
+      - name: Load image into kind
+        run: kind load docker-image --name "${CLUSTER}" "${IMAGE}"
+
+      # helm and kubectl are provided by kind-action's toolchain / the runner image.
+      - name: Run end-to-end proof
+        env:
+          # cluster already exists (kind-action created it) and the image is loaded;
+          # keep it up on failure so the "collect logs" step can inspect it.
+          KEEP: "1"
+          SKIP_IMAGE_BUILD: "1"
+        run: ./dev/e2e/run.sh
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          CTX="kind-${CLUSTER}"
+          echo "::group::pods"
+          kubectl --context "$CTX" get pods -A || true
+          echo "::endgroup::"
+          echo "::group::controller logs"
+          kubectl --context "$CTX" -n gitea-actions-controller logs deploy/gitea-runner-controller --tail=200 || true
+          echo "::endgroup::"
+          echo "::group::listener logs"
+          kubectl --context "$CTX" -n gitea-actions-controller logs deploy/gitea-listener --tail=100 || true
+          echo "::endgroup::"
+          echo "::group::ephemeralrunners"
+          kubectl --context "$CTX" get ephemeralrunners -A -o wide || true
+          echo "::endgroup::"
