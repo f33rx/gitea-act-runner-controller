@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "design/**"
+      - "dev/**"
+      - "feat/**"
+      - "spec/**"
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.24.13"
+  GOLANGCI_LINT_VERSION: "v1.64.8"
+  GOSEC_VERSION: "v2.21.4"
+  # Last golang.org/x/tools release that still builds under Go 1.24; newer
+  # goimports requires Go >= 1.25, which GOTOOLCHAIN=local forbids here.
+  GOIMPORTS_VERSION: "v0.30.0"
+  # Pin the toolchain so tools that declare a newer `go` directive cannot
+  # silently download and build against a different Go version.
+  GOTOOLCHAIN: local
+
+jobs:
+  # Detect whether this branch carries Go sources. The docs-only slices
+  # (design/**, dev/**) have no go.mod, so the Go gates below are skipped for
+  # them rather than failing.
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_go: ${{ steps.check.outputs.has_go }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f go.mod ]; then
+            echo "has_go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Style + format gate: gofmt and goimports must report no diffs.
+  format:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+      - name: gofmt
+        run: |
+          fmt_out="$(gofmt -l $(git ls-files '*.go' | grep -v 'zz_generated'))"
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt-clean:"
+            echo "$fmt_out"
+            exit 1
+          fi
+          echo "gofmt: OK"
+      - name: goimports
+        run: |
+          go install golang.org/x/tools/cmd/goimports@${{ env.GOIMPORTS_VERSION }}
+          imp_out="$("$(go env GOPATH)/bin/goimports" -l $(git ls-files '*.go' | grep -v 'zz_generated'))"
+          if [ -n "$imp_out" ]; then
+            echo "The following files are not goimports-clean:"
+            echo "$imp_out"
+            exit 1
+          fi
+          echo "goimports: OK"
+
+  # Lint gate: go vet + golangci-lint (govet, staticcheck, errcheck,
+  # ineffassign, unused, gocritic, revive, gofmt) per .golangci.yml.
+  lint:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+      - name: go vet
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=5m
+
+  # Static analysis gate: gosec + semgrep (Go + security-audit rulesets).
+  static-analysis:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }}
+          "$(go env GOPATH)/bin/gosec" ./...
+      - name: semgrep
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/golang
+            p/security-audit
+
+  # Build + test gate: the module must build and its tests must pass.
+  build-test:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+      - name: build
+        run: go build ./...
+      - name: test
+        run: go test -race ./...
+
+  # Generated-artifact drift gate: regenerating CRDs and deepcopy from the Go
+  # types must produce no diff, so the checked-in manifests stay in sync.
+  generate-check:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+      - name: regenerate CRDs and deepcopy
+        run: |
+          go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0 \
+            crd paths=./api/... output:crd:dir=./config/crd
+          go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0 \
+            object:headerFile=hack/boilerplate.go.txt paths=./api/...
+      - name: verify no drift
+        run: |
+          if ! git diff --quiet; then
+            echo "Generated files are out of date. Run 'make manifests generate' and commit:"
+            git diff --stat
+            exit 1
+          fi
+          echo "generated artifacts: up to date"
