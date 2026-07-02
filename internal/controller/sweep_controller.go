@@ -47,7 +47,7 @@ type SweepReconciler struct {
 
 // Reconcile runs a periodic sweep for orphaned runners.
 // It requeues every 60 seconds, and performs a sweep if 60+ seconds have passed.
-func (r *SweepReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SweepReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
 	now := time.Now()
@@ -93,13 +93,13 @@ func (r *SweepReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			continue
 		}
 
-		key := fmt.Sprintf("%s:%s", runnerSet.Spec.GiteaConfigUrl, runnerSet.Spec.OrgName)
+		key := fmt.Sprintf("%s:%s", runnerSet.Spec.GiteaConfigURL, runnerSet.Spec.OrgName)
 		if scanned[key] {
 			continue
 		}
 		scanned[key] = true
 
-		r.sweepOrgRunners(ctx, runnerSet.Spec.GiteaConfigUrl, runnerSet.Spec.OrgName, token)
+		r.sweepOrgRunners(ctx, runnerSet.Spec.GiteaConfigURL, runnerSet.Spec.OrgName, token)
 	}
 
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -181,17 +181,17 @@ func (r *SweepReconciler) sweepOrgRunners(ctx context.Context, giteaURL, org, to
 }
 
 // SetupWithManager starts a goroutine that periodically sweeps for orphaned runners.
-func (r *SweepReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *SweepReconciler) SetupWithManager(_ ctrl.Manager) error {
 	r.lastSweep = time.Now()
 
 	// Start a periodic sweep in the background.
-	go r.periodicSweep(mgr.GetConfig())
+	go r.periodicSweep()
 
 	return nil
 }
 
 // periodicSweep runs the sweep every 60 seconds.
-func (r *SweepReconciler) periodicSweep(config interface{}) {
+func (r *SweepReconciler) periodicSweep() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
