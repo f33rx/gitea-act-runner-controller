@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -155,7 +156,7 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	return ctrl.Result{RequeueAfter: 10}, nil
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 // handleDeletion handles the dual finalizer logic for runner teardown.

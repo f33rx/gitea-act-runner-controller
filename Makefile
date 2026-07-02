@@ -1,4 +1,4 @@
-.PHONY: help build test lint security fmt vet clean docker-build docker-load manifests generate
+.PHONY: help build test lint security fmt vet clean docker-build docker-load manifests generate e2e e2e-keep
 
 # Pin tool versions so local runs match CI. goimports/gosec @latest now require
 # Go 1.25; these are the last releases that build under the pinned Go 1.24.
@@ -23,6 +23,8 @@ help:
 	@echo "  clean            - Clean build artifacts"
 	@echo "  docker-build     - Build Docker image"
 	@echo "  docker-load      - Load Docker image into kind cluster"
+	@echo "  e2e              - Full kind+Gitea end-to-end proof (creates + deletes cluster)"
+	@echo "  e2e-keep         - Same as e2e but leaves the cluster up for inspection"
 
 # Regenerate CRDs under config/crd from the +kubebuilder markers on the API types.
 # The API types deliberately avoid embedding core k8s types (corev1.PodTemplateSpec,
@@ -120,3 +122,13 @@ install-tools:
 	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)'
 	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)'
 	@echo "Use: pipx install semgrep  (or brew install semgrep)"
+
+# Full end-to-end proof: kind cluster + Gitea + operator, trigger a workflow, assert the
+# ephemeral-runner lifecycle (scale-up -> job success -> graceful teardown to zero). The
+# script creates and (by default) deletes the kind cluster, so it is safe in CI.
+e2e:
+	@./dev/e2e/run.sh
+
+# e2e but keep the cluster up afterwards for manual inspection.
+e2e-keep:
+	@KEEP=1 ./dev/e2e/run.sh
