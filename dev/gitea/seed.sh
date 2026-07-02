@@ -123,6 +123,7 @@ WF_B64=$(printf '%s' "$WF_CONTENT" | base64 | tr -d '\n')
 # content write even after the branch GET returns 200, so retry on any non-2xx and print
 # the real status code instead of letting `curl -f` exit opaquely (was exit 22 in CI).
 # Recompute the existing sha inside the loop so a create->update transition is handled.
+WF_BODY_FILE="$(mktemp -t garc-wf-body.XXXXXX)"
 write_workflow() {
   local sha method payload
   # `|| true` so a 404 body (fresh repo, file absent) does not trip `set -o pipefail`.
@@ -135,7 +136,9 @@ write_workflow() {
     method=POST
     payload="{\"content\":\"${WF_B64}\",\"message\":\"add ci workflow\",\"branch\":\"main\"}"
   fi
-  curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X "$method" \
+  # Capture the response body so a persistent non-2xx (e.g. the CI 422) reveals its cause
+  # instead of just a status code.
+  curl -s -o "${WF_BODY_FILE}" -w '%{http_code}' "${AUTH[@]}" -X "$method" \
     "${API}/repos/${ORG}/${REPO}/contents/${WF_PATH}" \
     -H 'Content-Type: application/json' -d "$payload"
 }
@@ -143,9 +146,9 @@ log "writing workflow ${WF_PATH}"
 for i in $(seq 1 20); do
   code=$(write_workflow)
   case "$code" in
-    200|201) log "workflow ${WF_PATH} written (HTTP ${code})"; break ;;
+    200|201) log "workflow ${WF_PATH} written (HTTP ${code})"; rm -f "${WF_BODY_FILE}"; break ;;
     *)
-      log "workflow write attempt ${i} returned HTTP ${code}; retrying"
+      log "workflow write attempt ${i} returned HTTP ${code} (body: $(tr -d '\n' < "${WF_BODY_FILE}" | cut -c1-300)); retrying"
       sleep 1
       [ "$i" = 20 ] && { log "ERROR: workflow write never succeeded (last HTTP ${code})"; exit 1; }
       ;;
