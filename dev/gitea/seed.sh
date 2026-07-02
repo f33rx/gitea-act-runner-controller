@@ -85,6 +85,19 @@ else
     >/dev/null
 fi
 
+# auto_init is asynchronous: the default branch may not exist for a moment after the repo
+# is created, so a content push to branch=main can 404 (curl -f -> exit 22). Wait for the
+# main branch to materialize before writing files. On a repo that already existed this
+# passes on the first probe.
+log "waiting for the '${REPO}' default branch to be ready"
+for i in $(seq 1 30); do
+  if curl -sf "${AUTH[@]}" "${API}/repos/${ORG}/${REPO}/branches/main" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+  [ "$i" = 30 ] && { log "ERROR: repo '${ORG}/${REPO}' main branch never became ready"; exit 1; }
+done
+
 # sample workflow: a trivial job that just echoes, so a registered runner has something
 # to claim. Base64-put via the contents API (create-or-update).
 WF_PATH=".gitea/workflows/ci.yml"
