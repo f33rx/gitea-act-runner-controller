@@ -27,36 +27,89 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	giteaactionsv1alpha1 "github.com/f33rx/gitea-act-runner-controller/api/v1alpha1"
 	"github.com/f33rx/gitea-act-runner-controller/internal/gitea"
 )
 
+// defaultSweepInterval is how often the sweep runs when SweepInterval is unset.
+const defaultSweepInterval = 60 * time.Second
+
 // SweepReconciler periodically sweeps for orphaned Gitea runners whose pods are gone.
 // This catches force-deletes (kubectl delete --force) and crashes that bypass the finalizer.
+//
+// It is registered with the controller-runtime manager as a Runnable (not an
+// object-watching controller), so it is leader-election-gated and its lifecycle
+// is bound to the manager: in an HA (multi-replica) deployment only the leader
+// sweeps, and the loop drains cleanly when the manager receives SIGTERM.
 type SweepReconciler struct {
 	client.Client
-	Scheme    *runtime.Scheme
-	lastSweep time.Time
+	Scheme *runtime.Scheme
+
+	// SweepInterval controls how often the sweep runs. Defaults to
+	// defaultSweepInterval when zero.
+	SweepInterval time.Duration
 }
+
+// Ensure SweepReconciler satisfies the manager runnable interfaces at compile time.
+var (
+	_ manager.Runnable               = &SweepReconciler{}
+	_ manager.LeaderElectionRunnable = &SweepReconciler{}
+)
 
 //+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=gitearunnersets,verbs=get;list;watch
 //+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunners,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
-// Reconcile runs a periodic sweep for orphaned runners.
-// It requeues every 60 seconds, and performs a sweep if 60+ seconds have passed.
-func (r *SweepReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+// SetupWithManager registers the sweep as a manager Runnable so it is
+// leader-election-gated and lifecycle-managed by controller-runtime.
+func (r *SweepReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return mgr.Add(r)
+}
 
-	now := time.Now()
-	// Only run the sweep every 60 seconds to avoid hammering the API.
-	if r.lastSweep.Add(60 * time.Second).After(now) {
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+// NeedLeaderElection reports that the sweep must run only on the elected leader.
+// Without this, every replica in an HA deployment would sweep concurrently and
+// race to deregister the same runners.
+func (r *SweepReconciler) NeedLeaderElection() bool {
+	return true
+}
+
+// Start runs the periodic sweep until ctx is cancelled. It blocks, satisfying
+// the manager.Runnable contract; the manager cancels ctx on shutdown (SIGTERM),
+// which drains the loop cleanly.
+func (r *SweepReconciler) Start(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithName("sweep")
+
+	interval := r.SweepInterval
+	if interval <= 0 {
+		interval = defaultSweepInterval
 	}
 
-	r.lastSweep = now
+	logger.Info("starting orphaned-runner sweep", "interval", interval)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Run once immediately so a fresh leader does not wait a full interval.
+	r.sweep(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("stopping orphaned-runner sweep")
+			return nil
+		case <-ticker.C:
+			r.sweep(ctx)
+		}
+	}
+}
+
+// sweep performs a single sweep pass across all org-scoped GiteaRunnerSets.
+// Errors are logged and swallowed: a single failing pass must not stop the loop.
+func (r *SweepReconciler) sweep(ctx context.Context) {
+	logger := log.FromContext(ctx).WithName("sweep")
 
 	// Get the teardown credential Secret.
 	teardownSecretName := types.NamespacedName{
@@ -65,14 +118,14 @@ func (r *SweepReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.R
 	}
 	teardownSecret := &corev1.Secret{}
 	if err := r.Get(ctx, teardownSecretName, teardownSecret); err != nil {
-		log.Error(err, "failed to read teardown credential Secret", "secret", teardownSecretName)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		logger.Error(err, "failed to read teardown credential Secret", "secret", teardownSecretName)
+		return
 	}
 
 	token := string(teardownSecret.Data["token"])
 	if token == "" {
-		log.Error(fmt.Errorf("empty token"), "failed to read token from teardown Secret")
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		logger.Error(fmt.Errorf("empty token"), "failed to read token from teardown Secret")
+		return
 	}
 
 	// Get all GiteaRunnerSets to discover which orgs/URLs to sweep.
@@ -80,8 +133,8 @@ func (r *SweepReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.R
 	// This ensures we can sweep orphaned runners even when no EphemeralRunner CRs exist.
 	runnerSets := &giteaactionsv1alpha1.GiteaRunnerSetList{}
 	if err := r.List(ctx, runnerSets); err != nil {
-		log.Error(err, "failed to list GiteaRunnerSets")
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		logger.Error(err, "failed to list GiteaRunnerSets")
+		return
 	}
 
 	// Track scanned orgs/URLs to avoid duplicate Gitea API calls.
@@ -101,8 +154,6 @@ func (r *SweepReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.R
 
 		r.sweepOrgRunners(ctx, runnerSet.Spec.GiteaConfigURL, runnerSet.Spec.OrgName, token)
 	}
-
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
 // sweepOrgRunners finds orphaned runners in a Gitea org and deregisters them.
@@ -114,12 +165,12 @@ func (r *SweepReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.R
 // will be matched by a live CR (whose pod is running), so it won't be deregistered even if
 // status updates haven't fully propagated.
 func (r *SweepReconciler) sweepOrgRunners(ctx context.Context, giteaURL, org, token string) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx).WithName("sweep")
 
 	client := gitea.NewClient(giteaURL, token)
 	runners, err := client.ListOrgRunners(org)
 	if err != nil {
-		log.Error(err, "failed to list org runners", "org", org)
+		logger.Error(err, "failed to list org runners", "org", org)
 		return
 	}
 
@@ -127,7 +178,7 @@ func (r *SweepReconciler) sweepOrgRunners(ctx context.Context, giteaURL, org, to
 	// whose pod is still running. Use the runner NAME as the stable identity.
 	runnerList := &giteaactionsv1alpha1.EphemeralRunnerList{}
 	if err := r.List(ctx, runnerList); err != nil {
-		log.Error(err, "failed to list EphemeralRunners for sweep")
+		logger.Error(err, "failed to list EphemeralRunners for sweep")
 		return
 	}
 
@@ -146,7 +197,7 @@ func (r *SweepReconciler) sweepOrgRunners(ctx context.Context, giteaURL, org, to
 				// Pod exists. This CR is still active and claims the runner by name.
 				// Use CR name as the stable identity (matches Gitea runner name).
 				claimedRunnerNames[er.Name] = true
-				log.V(2).Info("runner has live pod", "name", er.Name, "pod", pod.Name)
+				logger.V(2).Info("runner has live pod", "name", er.Name, "pod", pod.Name)
 			}
 		}
 	}
@@ -160,48 +211,22 @@ func (r *SweepReconciler) sweepOrgRunners(ctx context.Context, giteaURL, org, to
 		// Check if this runner name is claimed by a live CR.
 		if claimedRunnerNames[runnerRow.Name] {
 			// Claimed, not orphaned.
-			log.V(2).Info("runner is claimed by a live CR", "name", runnerRow.Name, "id", runnerRow.ID)
+			logger.V(2).Info("runner is claimed by a live CR", "name", runnerRow.Name, "id", runnerRow.ID)
 			continue
 		}
 
 		// Orphaned: no CR claims it.
-		log.Info("found orphaned ephemeral runner, deregistering", "org", org, "runnerId", runnerRow.ID, "name", runnerRow.Name)
+		logger.Info("found orphaned ephemeral runner, deregistering", "org", org, "runnerId", runnerRow.ID, "name", runnerRow.Name)
 		statusCode, err := client.DeregisterOrgRunner(org, runnerRow.ID)
 		if err != nil {
-			log.Error(err, "failed to deregister orphaned runner", "runnerId", runnerRow.ID)
+			logger.Error(err, "failed to deregister orphaned runner", "runnerId", runnerRow.ID)
 			continue
 		}
 
 		if statusCode != 204 && statusCode != 404 {
-			log.Error(fmt.Errorf("unexpected status code"), "deregister returned non-204", "statusCode", statusCode)
+			logger.Error(fmt.Errorf("unexpected status code"), "deregister returned non-204", "statusCode", statusCode)
 		} else {
-			log.Info("deregistered orphaned runner", "runnerId", runnerRow.ID, "statusCode", statusCode)
+			logger.Info("deregistered orphaned runner", "runnerId", runnerRow.ID, "statusCode", statusCode)
 		}
-	}
-}
-
-// SetupWithManager starts a goroutine that periodically sweeps for orphaned runners.
-func (r *SweepReconciler) SetupWithManager(_ ctrl.Manager) error {
-	r.lastSweep = time.Now()
-
-	// Start a periodic sweep in the background.
-	go r.periodicSweep()
-
-	return nil
-}
-
-// periodicSweep runs the sweep every 60 seconds.
-func (r *SweepReconciler) periodicSweep() {
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		ctx := context.Background()
-		_, _ = r.Reconcile(ctx, ctrl.Request{
-			NamespacedName: types.NamespacedName{
-				Namespace: "gitea-actions-controller",
-				Name:      "sweep",
-			},
-		})
 	}
 }

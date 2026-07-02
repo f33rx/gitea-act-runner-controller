@@ -47,8 +47,12 @@ func init() {
 func main() {
 	var metricsAddr string
 	var probeAddr string
+	var enableLeaderElection bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+		"Enable leader election for controller manager. Required for HA (multi-replica) deployments so "+
+			"leader-election-gated components such as the sweep run on only one replica at a time.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -63,6 +67,8 @@ func main() {
 			BindAddress: metricsAddr,
 		},
 		HealthProbeBindAddress: probeAddr,
+		LeaderElection:         enableLeaderElection,
+		LeaderElectionID:       "gitea-actions-controller.blackrabbit.dev",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
