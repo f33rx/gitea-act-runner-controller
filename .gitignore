@@ -4,3 +4,8 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Build artifacts
+/bin/
+/manager
+/cmd/manager/manager
