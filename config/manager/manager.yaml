@@ -57,6 +57,14 @@ rules:
 - apiGroups: [""]
   resources: ["serviceaccounts"]
   verbs: ["get", "list", "watch"]
+# Leader election (--leader-elect): the manager acquires a Lease and records
+# leadership transitions as Events.
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
