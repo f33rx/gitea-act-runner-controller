@@ -113,21 +113,38 @@ jobs:
 YAML
 )
 WF_B64=$(printf '%s' "$WF_CONTENT" | base64)
-# does the file exist already? -> update with its sha; else create
-EXIST_SHA=$(curl -s "${AUTH[@]}" "${API}/repos/${ORG}/${REPO}/contents/${WF_PATH}?ref=main" | jqget sha)
-if [ -n "$EXIST_SHA" ]; then
-  log "workflow ${WF_PATH} exists; updating"
-  curl -sf "${AUTH[@]}" -X PUT "${API}/repos/${ORG}/${REPO}/contents/${WF_PATH}" \
-    -H 'Content-Type: application/json' \
-    -d "{\"content\":\"${WF_B64}\",\"message\":\"update ci workflow\",\"sha\":\"${EXIST_SHA}\",\"branch\":\"main\"}" \
-    >/dev/null
-else
-  log "adding workflow ${WF_PATH}"
-  curl -sf "${AUTH[@]}" -X POST "${API}/repos/${ORG}/${REPO}/contents/${WF_PATH}" \
-    -H 'Content-Type: application/json' \
-    -d "{\"content\":\"${WF_B64}\",\"message\":\"add ci workflow\",\"branch\":\"main\"}" \
-    >/dev/null
-fi
+# Write the workflow file (create-or-update). A freshly-created repo can briefly reject a
+# content write even after the branch GET returns 200, so retry on any non-2xx and print
+# the real status code instead of letting `curl -f` exit opaquely (was exit 22 in CI).
+# Recompute the existing sha inside the loop so a create->update transition is handled.
+write_workflow() {
+  local sha method payload
+  # `|| true` so a 404 body (fresh repo, file absent) does not trip `set -o pipefail`.
+  sha=$(curl -s "${AUTH[@]}" "${API}/repos/${ORG}/${REPO}/contents/${WF_PATH}?ref=main" \
+          2>/dev/null | jqget sha 2>/dev/null || true)
+  if [ -n "$sha" ]; then
+    method=PUT
+    payload="{\"content\":\"${WF_B64}\",\"message\":\"update ci workflow\",\"sha\":\"${sha}\",\"branch\":\"main\"}"
+  else
+    method=POST
+    payload="{\"content\":\"${WF_B64}\",\"message\":\"add ci workflow\",\"branch\":\"main\"}"
+  fi
+  curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X "$method" \
+    "${API}/repos/${ORG}/${REPO}/contents/${WF_PATH}" \
+    -H 'Content-Type: application/json' -d "$payload"
+}
+log "writing workflow ${WF_PATH}"
+for i in $(seq 1 20); do
+  code=$(write_workflow)
+  case "$code" in
+    200|201) log "workflow ${WF_PATH} written (HTTP ${code})"; break ;;
+    *)
+      log "workflow write attempt ${i} returned HTTP ${code}; retrying"
+      sleep 1
+      [ "$i" = 20 ] && { log "ERROR: workflow write never succeeded (last HTTP ${code})"; exit 1; }
+      ;;
+  esac
+done
 
 # --- sanity: org runners endpoint reachable under the new token (ADR 0006 path) ---
 RUNNERS_HTTP=$(curl -s -o /dev/null -w '%{http_code}' \
