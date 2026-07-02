@@ -43,7 +43,7 @@ spec:
             description: EphemeralRunnerSpec defines the desired state of an EphemeralRunner.
             properties:
               giteaConfigUrl:
-                description: GiteaConfigUrl is the URL of the Gitea instance.
+                description: GiteaConfigURL is the URL of the Gitea instance.
                 type: string
               giteaRunnerSetName:
                 description: GiteaRunnerSetName is the name of the parent GiteaRunnerSet.
@@ -92,7 +92,7 @@ spec:
                 description: Reason is a message explaining the current phase.
                 type: string
               runnerId:
-                description: RunnerId is the Gitea runner ID assigned at registration.
+                description: RunnerID is the Gitea runner ID assigned at registration.
                 format: int64
                 type: integer
               runnerUUID:

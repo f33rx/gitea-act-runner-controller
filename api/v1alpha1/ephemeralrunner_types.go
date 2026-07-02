@@ -32,8 +32,8 @@ const (
 
 // EphemeralRunnerSpec defines the desired state of an EphemeralRunner.
 type EphemeralRunnerSpec struct {
-	// GiteaConfigUrl is the URL of the Gitea instance.
-	GiteaConfigUrl string `json:"giteaConfigUrl"`
+	// GiteaConfigURL is the URL of the Gitea instance.
+	GiteaConfigURL string `json:"giteaConfigUrl"`
 
 	// RegistrationToken is the per-pod registration token (from Secret).
 	RegistrationToken string `json:"registrationToken"`
@@ -59,8 +59,8 @@ type EphemeralRunnerStatus struct {
 	// Reason is a message explaining the current phase.
 	Reason string `json:"reason,omitempty"`
 
-	// RunnerId is the Gitea runner ID assigned at registration.
-	RunnerId int64 `json:"runnerId,omitempty"`
+	// RunnerID is the Gitea runner ID assigned at registration.
+	RunnerID int64 `json:"runnerId,omitempty"`
 
 	// RunnerUUID is the Gitea runner UUID assigned at registration.
 	RunnerUUID string `json:"runnerUUID,omitempty"`

@@ -67,7 +67,7 @@ vet:
 # Install golangci-lint and run it
 golangci-lint:
 	@echo "Installing golangci-lint..."
-	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.57.0'
+	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8'
 	@echo "Running golangci-lint..."
 	@zsh -lc 'cd $$(pwd) && mise exec -- golangci-lint run --timeout=5m --enable=govet,staticcheck,errcheck,ineffassign,unused,gocritic,revive'
 
@@ -113,6 +113,6 @@ install-tools:
 	@echo "Installing required build tools..."
 	@zsh -lc 'cd $$(pwd) && mise exec -- go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0'
 	@zsh -lc 'cd $$(pwd) && mise exec -- go install golang.org/x/tools/cmd/goimports@latest'
-	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.57.0'
+	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8'
 	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/securego/gosec/v2/cmd/gosec@latest'
 	@echo "Use: pipx install semgrep  (or brew install semgrep)"

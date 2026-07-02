@@ -62,7 +62,7 @@ spec:
                 - name
                 type: object
               giteaConfigUrl:
-                description: GiteaConfigUrl is the URL of the Gitea instance.
+                description: GiteaConfigURL is the URL of the Gitea instance.
                 type: string
               labels:
                 description: Labels are the runner labels (e.g., ubuntu-latest, dind).

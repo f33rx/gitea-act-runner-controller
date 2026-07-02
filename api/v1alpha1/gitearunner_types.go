@@ -39,8 +39,8 @@ type SecretKeySelector struct {
 
 // GiteaRunnerSetSpec defines the desired state of GiteaRunnerSet.
 type GiteaRunnerSetSpec struct {
-	// GiteaConfigUrl is the URL of the Gitea instance.
-	GiteaConfigUrl string `json:"giteaConfigUrl"`
+	// GiteaConfigURL is the URL of the Gitea instance.
+	GiteaConfigURL string `json:"giteaConfigUrl"`
 
 	// GiteaConfigSecretRef is a reference to the Secret containing the Gitea operator credential.
 	GiteaConfigSecretRef SecretKeySelector `json:"giteaConfigSecretRef"`

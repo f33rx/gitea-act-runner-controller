@@ -171,8 +171,8 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 
 	// Step 1: Deregister the runner from Gitea (org-scoped DELETE /orgs/{org}/actions/runners/{id}).
 	// This is the PRIMARY teardown path (not crash-only as was assumed before).
-	if runner.Status.RunnerId > 0 {
-		log.Info("finalizer: deregistering runner from Gitea", "runner", runner.Name, "runnerId", runner.Status.RunnerId)
+	if runner.Status.RunnerID > 0 {
+		log.Info("finalizer: deregistering runner from Gitea", "runner", runner.Name, "runnerId", runner.Status.RunnerID)
 
 		// Read the teardown credential Secret.
 		teardownSecretName := types.NamespacedName{
@@ -193,8 +193,8 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 		}
 
 		// Deregister from Gitea.
-		client := gitea.NewClient(runner.Spec.GiteaConfigUrl, token)
-		statusCode, err := client.DeregisterOrgRunner(runner.Spec.OrgName, runner.Status.RunnerId)
+		client := gitea.NewClient(runner.Spec.GiteaConfigURL, token)
+		statusCode, err := client.DeregisterOrgRunner(runner.Spec.OrgName, runner.Status.RunnerID)
 		if err != nil {
 			log.Error(err, "deregister API call failed")
 			// Requeue on transient errors (network, etc).
@@ -288,7 +288,7 @@ func (r *EphemeralRunnerReconciler) constructPod(ctx context.Context, runner *gi
 						},
 						{
 							Name:  "GITEA_INSTANCE_URL",
-							Value: runner.Spec.GiteaConfigUrl,
+							Value: runner.Spec.GiteaConfigURL,
 						},
 						{
 							Name:  "GITEA_RUNNER_EPHEMERAL",
