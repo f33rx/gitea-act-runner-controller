@@ -152,7 +152,7 @@ func (l *Listener) syncDemand(ctx context.Context) error {
 
 		// Poll Gitea for queued jobs.
 		giteaClient := gitea.NewClient(rs.Spec.GiteaConfigURL, token)
-		jobs, totalCount, err := giteaClient.ListOrgQueuedJobs(rs.Spec.OrgName)
+		jobs, totalCount, err := giteaClient.ListOrgQueuedJobs(ctx, rs.Spec.OrgName)
 		if err != nil {
 			log.Error(err, "failed to list queued jobs", "org", rs.Spec.OrgName)
 			continue

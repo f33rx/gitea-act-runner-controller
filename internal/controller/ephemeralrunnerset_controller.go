@@ -117,7 +117,7 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 			if grs.Spec.RunnerScope == "org" && grs.Spec.OrgName != "" {
 				giteaClient := gitea.NewClient(grs.Spec.GiteaConfigURL, token)
 				var err error
-				regToken, err = giteaClient.GetOrgRegistrationToken(grs.Spec.OrgName)
+				regToken, err = giteaClient.GetOrgRegistrationToken(ctx, grs.Spec.OrgName)
 				if err != nil {
 					log.Error(err, "failed to fetch registration token", "index", i)
 					return ctrl.Result{Requeue: true}, err
