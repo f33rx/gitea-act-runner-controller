@@ -19,12 +19,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -168,6 +170,12 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 				continue
 			}
 			if err := r.Delete(ctx, runner); err != nil {
+				if apierrors.IsNotFound(err) {
+					// Already gone (self-drained and GC'd between the List and this Delete);
+					// that is exactly the outcome we wanted, so count it and move on.
+					deleted++
+					continue
+				}
 				log.Error(err, "failed to delete EphemeralRunner", "runner", runner.Name)
 				return ctrl.Result{Requeue: true}, err
 			}
@@ -181,16 +189,26 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	// Update status with current count and patchID.
-	ers.Status.ReadyReplicas = currentCount
-	ers.Status.AvailableReplicas = currentCount
-	ers.Status.LastReconcilePatchID = ers.Spec.PatchID
-	if err := r.Status().Update(ctx, ers); err != nil {
+	// Update status with current count and patchID. Retry on conflict: the listener
+	// and scaling paths write to the ERS concurrently, so the copy we fetched at the
+	// top of Reconcile can go stale. Refetch and re-apply the status fields each try
+	// instead of failing the reconcile (which previously produced a steady stream of
+	// "the object has been modified" errors).
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &giteaactionsv1alpha1.EphemeralRunnerSet{}
+		if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
+			return err
+		}
+		latest.Status.ReadyReplicas = currentCount
+		latest.Status.AvailableReplicas = currentCount
+		latest.Status.LastReconcilePatchID = ers.Spec.PatchID
+		return r.Status().Update(ctx, latest)
+	}); err != nil {
 		log.Error(err, "failed to update EphemeralRunnerSet status")
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{RequeueAfter: 10}, nil
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 // constructEphemeralRunner constructs a new EphemeralRunner with Gitea config and token.
