@@ -25,10 +25,10 @@ func TestCountMatchingJobs(t *testing.T) {
 			[]gitea.Job{{Labels: []string{}}}, 0},
 		{"mixed batch counts only matching jobs",
 			[]gitea.Job{
-				{Labels: []string{"ubuntu-latest"}},           // match
-				{Labels: []string{"windows"}},                 // no
-				{Labels: []string{"ubuntu-latest", "gpu"}},    // no (gpu not in set)
-				{Labels: []string{"self-hosted"}},             // match
+				{Labels: []string{"ubuntu-latest"}},        // match
+				{Labels: []string{"windows"}},              // no
+				{Labels: []string{"ubuntu-latest", "gpu"}}, // no (gpu not in set)
+				{Labels: []string{"self-hosted"}},          // match
 			}, 2},
 	}
 	for _, c := range cases {

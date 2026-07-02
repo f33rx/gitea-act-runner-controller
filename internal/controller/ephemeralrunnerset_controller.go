@@ -113,7 +113,7 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 			// Fetch a fresh registration token for this runner.
 			var regToken string
 			if grs.Spec.RunnerScope == "org" && grs.Spec.OrgName != "" {
-				giteaClient := gitea.NewClient(grs.Spec.GiteaConfigUrl, token)
+				giteaClient := gitea.NewClient(grs.Spec.GiteaConfigURL, token)
 				var err error
 				regToken, err = giteaClient.GetOrgRegistrationToken(grs.Spec.OrgName)
 				if err != nil {
@@ -159,7 +159,7 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 			runner := &ownedRunners.Items[i]
 			// Only delete idle (never-claimed) runners: Pending phase, or empty phase
-			// with no assigned RunnerId yet. Never delete a Running/Succeeded runner.
+			// with no assigned RunnerID yet. Never delete a Running/Succeeded runner.
 			phase := runner.Status.Phase
 			isIdle := phase == "" || phase == giteaactionsv1alpha1.EphemeralRunnerPending
 			if !isIdle {
@@ -209,7 +209,7 @@ func (r *EphemeralRunnerSetReconciler) constructEphemeralRunner(
 			Namespace: grs.Namespace,
 		},
 		Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
-			GiteaConfigUrl:     grs.Spec.GiteaConfigUrl,
+			GiteaConfigURL:     grs.Spec.GiteaConfigURL,
 			RegistrationToken:  regToken,
 			Labels:             grs.Spec.Labels,
 			RunnerScope:        grs.Spec.RunnerScope,

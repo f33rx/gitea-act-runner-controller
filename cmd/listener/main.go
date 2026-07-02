@@ -151,7 +151,7 @@ func (l *Listener) syncDemand(ctx context.Context) error {
 		}
 
 		// Poll Gitea for queued jobs.
-		giteaClient := gitea.NewClient(rs.Spec.GiteaConfigUrl, token)
+		giteaClient := gitea.NewClient(rs.Spec.GiteaConfigURL, token)
 		jobs, totalCount, err := giteaClient.ListOrgQueuedJobs(rs.Spec.OrgName)
 		if err != nil {
 			log.Error(err, "failed to list queued jobs", "org", rs.Spec.OrgName)
@@ -254,13 +254,13 @@ func jobMatchesSet(jobLabels []string, setLabelSet map[string]struct{}) bool {
 	return true
 }
 
-// clamp returns value clamped between min and max.
-func (l *Listener) clamp(value, min, max int32) int32 {
-	if value < min {
-		return min
+// clamp returns value clamped between lo and hi.
+func (l *Listener) clamp(value, lo, hi int32) int32 {
+	if value < lo {
+		return lo
 	}
-	if value > max {
-		return max
+	if value > hi {
+		return hi
 	}
 	return value
 }
