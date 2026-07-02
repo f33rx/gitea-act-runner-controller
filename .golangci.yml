@@ -1,0 +1,29 @@
+run:
+  timeout: 5m
+
+linters:
+  disable-all: false
+  enable:
+    - errcheck
+    - gocritic
+    - gofmt
+    - govet
+    - ineffassign
+    - revive
+    - staticcheck
+    - unused
+
+linters-settings:
+  govet:
+    # Run all vet analyzers except the two that are noisy-by-design here:
+    # shadow (removed from upstream vet defaults; flags the intentional
+    # `if err := f(); err != nil` idiom) and fieldalignment (memory-layout
+    # micro-optimization we do not enforce on API structs).
+    enable-all: true
+    disable:
+      - shadow
+      - fieldalignment
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

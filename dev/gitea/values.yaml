@@ -1,0 +1,93 @@
+# Dev Gitea for the garc operator -- lean, single-node, persistent.
+# Chart: gitea-charts/gitea 12.6.0  (appVersion 1.26.1 -- the garc pinned target).
+# NOT the deferred garc-nom hermetic CI harness; this is a stable dev/integration target.
+#
+# Install:
+#   helm upgrade --install gitea gitea-charts/gitea --version 12.6.0 \
+#     -n gitea --create-namespace -f dev/gitea/values.yaml
+#
+# Rationale for the lean profile:
+#   - SQLite + in-memory session/cache/queue: no external DB or valkey needed for a
+#     single-replica dev instance. Removes the bitnami PostgreSQL-HA / valkey-cluster
+#     subcharts (which now pull from the bitnamilegacy/* namespace) entirely.
+#   - Actions enabled so we can register ephemeral act_runners against it (garc-7ft.2
+#     lifecycle, the walking skeleton garc-7ft.7).
+
+# Pin the app image to the garc target. tag "" would resolve to the chart appVersion
+# (1.26.1) already, but pin it explicitly so the dev target never drifts on a chart bump.
+image:
+  tag: "1.26.1"
+  rootless: true
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Single-instance: no HA session/cache/queue backends.
+strategy:
+  type: Recreate
+
+# --- Disable every bundled subchart; SQLite + in-memory instead. ---
+postgresql:
+  enabled: false
+postgresql-ha:
+  enabled: false
+valkey:
+  enabled: false
+valkey-cluster:
+  enabled: false
+
+# Persist the SQLite DB + repos on the cluster's default local-path StorageClass.
+persistence:
+  enabled: true
+  size: 5Gi
+  # storageClass omitted -> uses "standard" (local-path), the garc-dev default.
+
+# Seeded admin. Dev-only credentials; fine to keep in-repo for a local kind instance.
+gitea:
+  admin:
+    username: gitea_admin
+    password: gitea_admin_pw_dev
+    email: "admin@garc.local"
+    passwordMode: keepUpdated
+
+  config:
+    APP_NAME: "garc dev Gitea"
+    server:
+      # ROOT_URL matches how we reach it via `kubectl port-forward svc/gitea 3000:3000`.
+      ROOT_URL: "http://localhost:3000/"
+      HTTP_PORT: 3000
+    database:
+      DB_TYPE: sqlite3
+    session:
+      PROVIDER: memory
+    cache:
+      ADAPTER: memory
+    queue:
+      TYPE: level          # embedded LevelDB queue on the PVC; no external broker.
+    actions:
+      ENABLED: true
+    service:
+      DISABLE_REGISTRATION: true   # admin creates users/orgs; no open signup on dev.
+    log:
+      LEVEL: info
+
+# Expose via NodePort; dev access is `kubectl port-forward` (kind maps no extra host
+# ports on garc-dev), so the NodePort itself is mostly a stable in-cluster handle.
+service:
+  http:
+    type: NodePort
+    port: 3000
+    nodePort: 30300
+  ssh:
+    type: NodePort
+    port: 2222
+    nodePort: 30322
+
+# Modest requests so it schedules comfortably on the 2-node kind cluster.
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi

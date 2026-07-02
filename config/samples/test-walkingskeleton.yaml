@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitea-runners
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitea-runner-creds
+  namespace: gitea-runners
+type: Opaque
+stringData:
+  # Populate with an org-scoped read+write token before applying:
+  #   kubectl -n gitea-runners create secret generic gitea-runner-creds \
+  #     --from-literal=token=$(cat dev/gitea/.org-token) --dry-run=client -o yaml | kubectl apply -f -
+  token: "YOUR_ORG_TOKEN_HERE"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitea-runner
+  namespace: gitea-runners
+---
+apiVersion: giteaactions.blackrabbit.dev/v1alpha1
+kind: EphemeralRunner
+metadata:
+  name: test-runner-1
+  namespace: gitea-runners
+spec:
+  giteaConfigUrl: http://gitea-http.gitea.svc.cluster.local:3000
+  registrationToken: "REPLACE_WITH_FRESH_TOKEN_FROM_POST_orgs_ORG_actions_runners_registration-token"
+  labels:
+    - "ubuntu-latest"
+  runnerScope: org
+  orgName: garc-dev
+  giteaRunnerSetName: test-set

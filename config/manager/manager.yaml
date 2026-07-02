@@ -1,0 +1,119 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitea-actions-controller
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitea-teardown-credential
+  namespace: gitea-actions-controller
+type: Opaque
+stringData:
+  token: "PLACEHOLDER_REPLACE_WITH_ORG_WRITE_TOKEN"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitea-runner-controller
+  namespace: gitea-actions-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gitea-runner-controller
+rules:
+# EphemeralRunner
+- apiGroups: ["giteaactions.blackrabbit.dev"]
+  resources: ["ephemeralrunners"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["giteaactions.blackrabbit.dev"]
+  resources: ["ephemeralrunners/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["giteaactions.blackrabbit.dev"]
+  resources: ["ephemeralrunners/finalizers"]
+  verbs: ["update"]
+# GiteaRunnerSet
+- apiGroups: ["giteaactions.blackrabbit.dev"]
+  resources: ["gitearunnersets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["giteaactions.blackrabbit.dev"]
+  resources: ["gitearunnersets/status"]
+  verbs: ["get", "update", "patch"]
+# EphemeralRunnerSet
+- apiGroups: ["giteaactions.blackrabbit.dev"]
+  resources: ["ephemeralrunnersets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["giteaactions.blackrabbit.dev"]
+  resources: ["ephemeralrunnersets/status"]
+  verbs: ["get", "update", "patch"]
+# Core resources
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gitea-runner-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gitea-runner-controller
+subjects:
+- kind: ServiceAccount
+  name: gitea-runner-controller
+  namespace: gitea-actions-controller
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea-runner-controller
+  namespace: gitea-actions-controller
+  labels:
+    app: gitea-runner-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea-runner-controller
+  template:
+    metadata:
+      labels:
+        app: gitea-runner-controller
+    spec:
+      serviceAccountName: gitea-runner-controller
+      containers:
+      - name: controller
+        image: gitea-runner-controller:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+          name: metrics
+        - containerPort: 8081
+          name: health
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi

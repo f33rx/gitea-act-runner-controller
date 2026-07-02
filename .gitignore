@@ -5,7 +5,38 @@
 .beads-credential-key
 .beads/proxieddb/
 
-# Build artifacts
-/bin/
-/manager
+# Binaries
+bin/
+manager
 /cmd/manager/manager
+*.o
+*.a
+*.so
+
+# Test coverage
+coverage.out
+*.test
+
+# Emacs/Vim
+*~
+*.swp
+*.swo
+*#
+.#*
+
+# MacOS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+
+# Go
+go.work
+
+# Tools
+dist/
+
+# Local config
+dev/gitea/.org-token
