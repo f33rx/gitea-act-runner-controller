@@ -1,8 +1,12 @@
 .PHONY: help build test lint security fmt vet clean docker-build docker-load manifests generate
 
-# Pin controller-gen so generated output is reproducible.
+# Pin tool versions so local runs match CI. goimports/gosec @latest now require
+# Go 1.25; these are the last releases that build under the pinned Go 1.24.
 CONTROLLER_GEN_VERSION ?= v0.14.0
 CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+GOLANGCI_LINT_VERSION ?= v1.64.8
+GOSEC_VERSION ?= v2.21.4
+GOIMPORTS_VERSION ?= v0.30.0
 
 help:
 	@echo "Gitea Actions Runner Controller Makefile"
@@ -55,7 +59,7 @@ fmt:
 # Install goimports if missing and format with it
 goimports:
 	@echo "Installing goimports..."
-	@zsh -lc 'cd $$(pwd) && mise exec -- go install golang.org/x/tools/cmd/goimports@latest'
+	@zsh -lc 'cd $$(pwd) && mise exec -- go install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)'
 	@echo "Running goimports..."
 	@zsh -lc 'cd $$(pwd) && mise exec -- goimports -l . 2>/dev/null | grep -v "^vendor/" | grep -v "zz_generated" || echo "goimports: OK"'
 
@@ -67,14 +71,14 @@ vet:
 # Install golangci-lint and run it
 golangci-lint:
 	@echo "Installing golangci-lint..."
-	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8'
+	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)'
 	@echo "Running golangci-lint..."
 	@zsh -lc 'cd $$(pwd) && mise exec -- golangci-lint run --timeout=5m --enable=govet,staticcheck,errcheck,ineffassign,unused,gocritic,revive'
 
 # Install gosec and run it
 gosec:
 	@echo "Installing gosec..."
-	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/securego/gosec/v2/cmd/gosec@latest'
+	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)'
 	@echo "Running gosec..."
 	@zsh -lc 'cd $$(pwd) && mise exec -- gosec ./...'
 
@@ -111,8 +115,8 @@ docker-load: docker-build
 # Install tools needed for build
 install-tools:
 	@echo "Installing required build tools..."
-	@zsh -lc 'cd $$(pwd) && mise exec -- go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0'
-	@zsh -lc 'cd $$(pwd) && mise exec -- go install golang.org/x/tools/cmd/goimports@latest'
-	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8'
-	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/securego/gosec/v2/cmd/gosec@latest'
+	@zsh -lc 'cd $$(pwd) && mise exec -- go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)'
+	@zsh -lc 'cd $$(pwd) && mise exec -- go install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)'
+	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)'
+	@zsh -lc 'cd $$(pwd) && mise exec -- go install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)'
 	@echo "Use: pipx install semgrep  (or brew install semgrep)"
