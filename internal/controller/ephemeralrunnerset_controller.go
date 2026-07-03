@@ -36,6 +36,7 @@ import (
 
 	giteaactionsv1alpha1 "github.com/f33rx/gitea-act-runner-controller/api/v1alpha1"
 	"github.com/f33rx/gitea-act-runner-controller/internal/gitea"
+	"github.com/f33rx/gitea-act-runner-controller/internal/metrics"
 )
 
 // EphemeralRunnerSetReconciler reconciles an EphemeralRunnerSet object.
@@ -87,20 +88,26 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 	log.V(1).Info("reconciling EphemeralRunnerSet", "namespace", ers.Namespace, "name", ers.Name,
 		"desired", desiredCount, "current", currentCount, "patchID", ers.Spec.PatchID)
 
+	// Read the GiteaRunnerSet: needed for scale-up (Gitea config) and, per ADR 0010,
+	// as the source of the min/max fleet gauges every reconcile records regardless of
+	// scale direction. By convention, ERS.Name == GiteaRunnerSet.Name, same namespace.
+	grs := &giteaactionsv1alpha1.GiteaRunnerSet{}
+	grsKey := types.NamespacedName{
+		Namespace: ers.Namespace,
+		Name:      ers.Name,
+	}
+	if err := r.Get(ctx, grsKey, grs); err != nil {
+		log.Error(err, "failed to get GiteaRunnerSet for EphemeralRunnerSet", "name", ers.Name)
+		return ctrl.Result{Requeue: true}, err
+	}
+
+	// ADR 0010: fleet gauges are reset from the current owned-runner list on every
+	// reconcile, not incremented/decremented per-event, so a missed or reordered event
+	// can never leave a stale count.
+	r.recordFleetMetrics(ers, grs, ownedRunners)
+
 	// Scale up: create missing EphemeralRunners.
 	if currentCount < desiredCount {
-		// Read the GiteaRunnerSet to get Gitea config.
-		// By convention, ERS.Name == GiteaRunnerSet.Name and same namespace.
-		grs := &giteaactionsv1alpha1.GiteaRunnerSet{}
-		grsKey := types.NamespacedName{
-			Namespace: ers.Namespace,
-			Name:      ers.Name, // ERS is named after the GiteaRunnerSet
-		}
-		if err := r.Get(ctx, grsKey, grs); err != nil {
-			log.Error(err, "failed to get GiteaRunnerSet for EphemeralRunnerSet", "name", ers.Name)
-			return ctrl.Result{Requeue: true}, err
-		}
-
 		// Get the credential Secret to fetch registration tokens.
 		credSecret := &corev1.Secret{}
 		credKey := types.NamespacedName{
@@ -232,6 +239,38 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// recordFleetMetrics implements ADR 0010 Decision 3's gauges: reset (not incremented)
+// to the current state on every reconcile, so a missed or reordered watch event can
+// never leave a stale value. Labels are gitearunnerset+namespace only (never per-runner
+// names), keeping cardinality bounded by fleet count, not runner churn.
+func (r *EphemeralRunnerSetReconciler) recordFleetMetrics(ers *giteaactionsv1alpha1.EphemeralRunnerSet, grs *giteaactionsv1alpha1.GiteaRunnerSet, ownedRunners *giteaactionsv1alpha1.EphemeralRunnerList) {
+	name := ers.Name
+	ns := ers.Namespace
+
+	counts := map[giteaactionsv1alpha1.EphemeralRunnerPhase]int{}
+	for i := range ownedRunners.Items {
+		phase := ownedRunners.Items[i].Status.Phase
+		if phase == "" {
+			phase = giteaactionsv1alpha1.EphemeralRunnerPending
+		}
+		counts[phase]++
+	}
+	for _, phase := range []giteaactionsv1alpha1.EphemeralRunnerPhase{
+		giteaactionsv1alpha1.EphemeralRunnerPending,
+		giteaactionsv1alpha1.EphemeralRunnerRunning,
+		giteaactionsv1alpha1.EphemeralRunnerSucceeded,
+		giteaactionsv1alpha1.EphemeralRunnerFailed,
+	} {
+		metrics.EphemeralRunnerPhaseCount.WithLabelValues(name, ns, string(phase)).Set(float64(counts[phase]))
+	}
+
+	metrics.EphemeralRunnerSetDesired.WithLabelValues(name, ns).Set(float64(ers.Spec.Replicas))
+	metrics.EphemeralRunnerSetMin.WithLabelValues(name, ns).Set(float64(grs.Spec.MinRunners))
+	metrics.EphemeralRunnerSetMax.WithLabelValues(name, ns).Set(float64(grs.Spec.MaxRunners))
+	metrics.EphemeralRunnerSetReady.WithLabelValues(name, ns).Set(float64(ers.Status.ReadyReplicas))
+	metrics.EphemeralRunnerSetAvailable.WithLabelValues(name, ns).Set(float64(ers.Status.AvailableReplicas))
 }
 
 // constructEphemeralRunner constructs a new EphemeralRunner with Gitea config and token.
