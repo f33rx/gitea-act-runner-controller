@@ -1,0 +1,118 @@
+# Default values for gitea-actions-controller.
+# See docs/adr/0011-packaging-helm-and-portability.md for the design rationale behind
+# these defaults, especially the RBAC scope (rbac.clusterScope) and pod security
+# context (Autopilot-safe by default) choices.
+
+image:
+  repository: gitea-runner-controller
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# rbac controls the ClusterRole vs. namespace-scoped Role choice (ADR 0011 Decision 2,
+# resolving garc-kvm/garc-csb). Defaults to namespace-scoped: the controller's actual
+# blast radius is pods/secrets it owns via its own CRs, never a namespace with no
+# GiteaRunnerSet in it, so cluster-wide access is broader than the common single-team
+# install actually needs.
+rbac:
+  # clusterScope: true grants a ClusterRole/ClusterRoleBinding (all namespaces), for a
+  # single shared operator managing GiteaRunnerSets across many teams' namespaces
+  # without redeploying the chart per namespace. false (default) grants a namespaced
+  # Role/RoleBinding per entry in watchNamespaces.
+  clusterScope: false
+  # watchNamespaces lists the namespaces the operator manages GiteaRunnerSets/pods/
+  # secrets in, when rbac.clusterScope is false. Defaults to the release namespace
+  # only. Remember to add new managed namespaces here and `helm upgrade` -- they are
+  # not picked up automatically the way a ClusterRole would.
+  watchNamespaces:
+    - "{{ .Release.Namespace }}"
+
+manager:
+  replicaCount: 1
+  # leaderElection should be enabled (and replicaCount raised to 2) for HA (ADR 0009).
+  leaderElection:
+    enabled: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # ADR 0008: manager-wide timeout defaults; a GiteaRunnerSet can override any of
+  # these. 0 (or a zero duration) means "no default for that knob."
+  timeouts:
+    defaultActiveDeadlineSeconds: 0
+    defaultStallWindow: 15m
+    defaultPendingTimeout: 5m
+
+listener:
+  replicaCount: 1
+  pollInterval: 10s
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# securityContext is applied to both the manager and listener pods/containers.
+# Restricted profile, admission-safe on GKE Autopilot with no WorkloadAllowlist
+# exception (ADR 0011 Decision 4) -- pending live confirmation, tracked as garc-0b0.
+# This does NOT apply to EphemeralRunner (runner) pods, which are a separate concern
+# (the GiteaRunnerSet's own pod template) outside this chart's scope.
+securityContext:
+  pod:
+    runAsNonRoot: true
+  container:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+# teardownCredential configures the Gitea org-write credential used by the manager's
+# finalizer/sweep to deregister runners (ADR 0006). Leave create=false and pre-create
+# the Secret yourself (recommended for anything beyond local dev) to avoid the token
+# passing through `helm install`/`--set` shell history and release history/state.
+teardownCredential:
+  create: false
+  # secretName is the existing Secret to use when create is false.
+  secretName: gitea-teardown-credential
+  # token is ONLY used when create is true (local/dev convenience). Never commit a
+  # real token into a values file.
+  token: ""
+
+# giteaRunnerSet optionally renders a GiteaRunnerSet as part of this release. Default
+# disabled: installing the operator and creating your org's runner set(s) are usually
+# separate, ordinary kubectl-apply/GitOps-managed lifecycles, not re-applied on every
+# `helm upgrade` of the operator itself (ADR 0011 Decision 1).
+giteaRunnerSet:
+  enabled: false
+  giteaConfigUrl: ""
+  giteaConfigSecretRef:
+    name: ""
+    key: token
+  runnerScope: org
+  orgName: ""
+  labels: []
+  minRunners: 0
+  maxRunners: 5
+  # resourcePolicy (reserved, ADR 0004 not yet implemented as a CRD field): once the
+  # ResourcePolicy CRD lands, this is the agreed values-schema slot for it. Not
+  # functional yet -- do not set.
+  # resourcePolicy:
+  #   repo: {}
+  #   org: {}
+  #   global: {}
+  #     requests:
+  #       cpu: ""
+  #       memory: ""
+  #     limits:
+  #       cpu: ""
+  #       memory: ""
+  # resources is the current (pre-ResourcePolicy) flat override for runner pod
+  # requests/limits, applied uniformly regardless of repo/org (ADR 0011 Decision 3).
+  resources: {}

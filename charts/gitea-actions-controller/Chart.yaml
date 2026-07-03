@@ -1,0 +1,14 @@
+apiVersion: v2
+name: gitea-actions-controller
+description: Gitea Actions Kubernetes operator -- ephemeral act_runner pods, demand-driven scaling, and guaranteed teardown against a Gitea instance's Actions API.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/f33rx/gitea-act-runner-controller
+sources:
+  - https://github.com/f33rx/gitea-act-runner-controller
+keywords:
+  - gitea
+  - actions
+  - ci
+  - kubernetes-operator
