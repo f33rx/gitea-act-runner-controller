@@ -1,0 +1,18 @@
+{{- if .Values.giteaRunnerSet.enabled }}
+apiVersion: giteaactions.blackrabbit.dev/v1alpha1
+kind: GiteaRunnerSet
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  giteaConfigUrl: {{ required "giteaRunnerSet.giteaConfigUrl is required when giteaRunnerSet.enabled is true" .Values.giteaRunnerSet.giteaConfigUrl | quote }}
+  giteaConfigSecretRef:
+    name: {{ required "giteaRunnerSet.giteaConfigSecretRef.name is required when giteaRunnerSet.enabled is true" .Values.giteaRunnerSet.giteaConfigSecretRef.name | quote }}
+    key: {{ .Values.giteaRunnerSet.giteaConfigSecretRef.key | quote }}
+  runnerScope: {{ .Values.giteaRunnerSet.runnerScope | quote }}
+  orgName: {{ .Values.giteaRunnerSet.orgName | quote }}
+  labels:
+    {{- toYaml .Values.giteaRunnerSet.labels | nindent 4 }}
+  minRunners: {{ .Values.giteaRunnerSet.minRunners }}
+  maxRunners: {{ .Values.giteaRunnerSet.maxRunners }}
+{{- end }}
