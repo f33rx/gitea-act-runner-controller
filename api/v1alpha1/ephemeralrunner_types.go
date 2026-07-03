@@ -49,6 +49,23 @@ type EphemeralRunnerSpec struct {
 
 	// GiteaRunnerSetName is the name of the parent GiteaRunnerSet.
 	GiteaRunnerSetName string `json:"giteaRunnerSetName"`
+
+	// ActiveDeadlineSeconds is the resolved hard cap on total pod lifetime (ADR 0008),
+	// copied down from the GiteaRunnerSet override or the manager default at creation
+	// time so each EphemeralRunner is self-describing. Applied to the Pod spec verbatim;
+	// the kubelet enforces it.
+	// +optional
+	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
+
+	// StallWindow is the resolved stall-detection window (ADR 0008), copied down from
+	// the GiteaRunnerSet override or the manager default at creation time.
+	// +optional
+	StallWindow *metav1.Duration `json:"stallWindow,omitempty"`
+
+	// PendingTimeout is the resolved pre-claim (Pending) timeout (ADR 0008), copied down
+	// from the GiteaRunnerSet override or the manager default at creation time.
+	// +optional
+	PendingTimeout *metav1.Duration `json:"pendingTimeout,omitempty"`
 }
 
 // EphemeralRunnerStatus defines the observed state of an EphemeralRunner.
@@ -71,8 +88,27 @@ type EphemeralRunnerStatus struct {
 	// PodName is the name of the associated Pod.
 	PodName string `json:"podName,omitempty"`
 
-	// LastObservedTime is the last time the runner was observed.
+	// LastObservedTime is the last time the runner's phase or reason changed.
 	LastObservedTime *metav1.Time `json:"lastObservedTime,omitempty"`
+
+	// PhaseStartTime is when the runner entered its current Phase. ADR 0008 uses this
+	// to measure how long a runner has been Pending (pre-claim timeout), independent of
+	// unrelated Reason-only status updates that also bump LastObservedTime.
+	PhaseStartTime *metav1.Time `json:"phaseStartTime,omitempty"`
+
+	// LastProgressTime is the last time the runner's claimed Gitea job log grew (ADR
+	// 0008's stall-detection liveness signal for a Running runner: any new step output
+	// means the job is doing something, whether or not the pod phase itself changed).
+	// act_runner streams step output to Gitea via its own protocol independent of the
+	// runner container's stdout, so this is read from Gitea's job-log endpoint, not
+	// kubectl logs. A Running runner with no LastProgressTime movement for the
+	// configured stall window is presumed stuck.
+	LastProgressTime *metav1.Time `json:"lastProgressTime,omitempty"`
+
+	// LastJobLogSize is the Gitea job-log Content-Length observed at LastProgressTime,
+	// used to detect growth on the next check via a cheap header-only comparison instead
+	// of re-downloading and diffing the full (growing) log body.
+	LastJobLogSize int64 `json:"lastJobLogSize,omitempty"`
 }
 
 // EphemeralRunner is the Schema for the ephemeralrunners API.

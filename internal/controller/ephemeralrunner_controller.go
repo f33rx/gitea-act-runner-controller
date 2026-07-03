@@ -55,6 +55,7 @@ type EphemeralRunnerReconciler struct {
 //+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunners,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunners/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunners/finalizers,verbs=update
+//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=gitearunnersets,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
@@ -156,7 +157,162 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
+	// ADR 0008: stuck-vs-slow detection. Re-fetch to see PhaseStartTime as just written
+	// by updateRunnerStatusFromPod (which operates on its own copy, not this one).
+	latest := &giteaactionsv1alpha1.EphemeralRunner{}
+	if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		log.Error(err, "failed to refetch runner for timeout check")
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning {
+		r.recordLogProgress(ctx, latest)
+	}
+	if timedOut, reason := r.checkTimeout(latest); timedOut {
+		log.Info("runner timed out, deleting", "runner", latest.Name, "reason", reason)
+		if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
+			log.Error(err, "failed to delete timed-out runner")
+			return ctrl.Result{Requeue: true}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// checkTimeout implements ADR 0008 Decisions 3-4: a Running runner whose container log
+// has not grown for StallWindow is presumed stuck (fail-and-teardown, no retry -- the
+// job may already be claimed); a Pending runner with no phase change for PendingTimeout
+// never claimed a job (pre-claim failure -- safe to delete and let the
+// EphemeralRunnerSet recreate it, which is this ADR's retry-with-backoff path). Both are
+// opt-in: a nil window/timeout on the runner (no GiteaRunnerSet override and no manager
+// default) disables that check.
+func (r *EphemeralRunnerReconciler) checkTimeout(runner *giteaactionsv1alpha1.EphemeralRunner) (bool, string) {
+	switch runner.Status.Phase {
+	case giteaactionsv1alpha1.EphemeralRunnerRunning:
+		if runner.Spec.StallWindow == nil {
+			return false, ""
+		}
+		// LastProgressTime (log-growth liveness) is the primary signal; recordLogProgress
+		// keeps it moving whenever the container log grows. If log-checking is disabled
+		// or has not observed anything yet, fall back to PhaseStartTime so stall
+		// detection still degrades to the coarser pod-phase-only signal instead of
+		// silently never firing.
+		anchor := runner.Status.LastProgressTime
+		if anchor == nil {
+			anchor = runner.Status.PhaseStartTime
+		}
+		if anchor == nil {
+			return false, ""
+		}
+		elapsed := time.Since(anchor.Time)
+		if elapsed >= runner.Spec.StallWindow.Duration {
+			return true, fmt.Sprintf("stalled: no log progress for %s (window %s)", elapsed.Round(time.Second), runner.Spec.StallWindow.Duration)
+		}
+	case giteaactionsv1alpha1.EphemeralRunnerPending:
+		if runner.Spec.PendingTimeout == nil || runner.Status.PhaseStartTime == nil {
+			return false, ""
+		}
+		elapsed := time.Since(runner.Status.PhaseStartTime.Time)
+		if elapsed >= runner.Spec.PendingTimeout.Duration {
+			return true, fmt.Sprintf("pending timeout: no progress for %s (timeout %s)", elapsed.Round(time.Second), runner.Spec.PendingTimeout.Duration)
+		}
+	}
+	return false, ""
+}
+
+// recordLogProgress implements ADR 0008 Decision 2's heartbeat: find the Gitea job this
+// runner claimed and compare its job-log Content-Length against the last observed size.
+// Any growth means act_runner is actively streaming step output to Gitea and the job is
+// presumed alive, resetting the stall clock. act_runner ships step output to Gitea via
+// its own UpdateLog/gRPC protocol independent of the runner container's stdout, so this
+// reads Gitea's job-log endpoint rather than kubectl logs. Errors (credential lookup,
+// API failures, no matching job yet) are logged and swallowed -- a transient failure
+// must not itself look like a stall; checkTimeout's PhaseStartTime fallback covers the
+// gap.
+func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner) {
+	log := log.FromContext(ctx)
+
+	giteaClient, err := r.giteaClientForRunner(ctx, runner)
+	if err != nil {
+		log.V(1).Info("failed to build Gitea client for stall liveness check", "runner", runner.Name, "error", err.Error())
+		return
+	}
+
+	jobs, err := giteaClient.ListOrgInProgressJobs(runner.Spec.OrgName)
+	if err != nil {
+		log.V(1).Info("failed to list in-progress jobs for stall liveness check", "runner", runner.Name, "error", err.Error())
+		return
+	}
+
+	var jobURL string
+	for _, job := range jobs {
+		if job.RunnerID == runner.Status.RunnerID {
+			jobURL = job.URL
+			break
+		}
+	}
+	if jobURL == "" {
+		// The runner hasn't (yet) claimed a job Gitea reports as in-progress -- nothing
+		// to measure growth against this reconcile.
+		return
+	}
+
+	size, err := giteaClient.JobLogSize(jobURL)
+	if err != nil {
+		log.V(1).Info("failed to read job log size for stall liveness check", "runner", runner.Name, "error", err.Error())
+		return
+	}
+	if size <= runner.Status.LastJobLogSize {
+		return
+	}
+
+	now := metav1.Now()
+	for i := 0; i < 3; i++ {
+		latest := &giteaactionsv1alpha1.EphemeralRunner{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: runner.Namespace, Name: runner.Name}, latest); err != nil {
+			log.Error(err, "failed to refetch runner for log-progress update")
+			return
+		}
+		latest.Status.LastProgressTime = &now
+		latest.Status.LastJobLogSize = size
+		if err := r.Status().Update(ctx, latest); err != nil {
+			if apierrors.IsConflict(err) && i < 2 {
+				continue
+			}
+			log.Error(err, "failed to update runner log-progress status")
+			return
+		}
+		runner.Status.LastProgressTime = &now
+		runner.Status.LastJobLogSize = size
+		return
+	}
+}
+
+// giteaClientForRunner looks up the runner's parent GiteaRunnerSet to obtain its
+// GiteaConfigSecretRef and builds a Gitea API client from that credential, mirroring
+// the read pattern already used by EphemeralRunnerSetReconciler and the listener.
+func (r *EphemeralRunnerReconciler) giteaClientForRunner(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner) (*gitea.Client, error) {
+	grs := &giteaactionsv1alpha1.GiteaRunnerSet{}
+	grsKey := types.NamespacedName{Namespace: runner.Namespace, Name: runner.Spec.GiteaRunnerSetName}
+	if err := r.Get(ctx, grsKey, grs); err != nil {
+		return nil, fmt.Errorf("failed to get parent GiteaRunnerSet %s: %w", grsKey, err)
+	}
+
+	secret := &corev1.Secret{}
+	secretKey := types.NamespacedName{Namespace: runner.Namespace, Name: grs.Spec.GiteaConfigSecretRef.Name}
+	if err := r.Get(ctx, secretKey, secret); err != nil {
+		return nil, fmt.Errorf("failed to get Gitea config Secret %s: %w", secretKey, err)
+	}
+
+	token := string(secret.Data[grs.Spec.GiteaConfigSecretRef.Key])
+	if token == "" {
+		return nil, fmt.Errorf("empty token in Gitea config Secret %s key %s", secretKey, grs.Spec.GiteaConfigSecretRef.Key)
+	}
+
+	return gitea.NewClient(grs.Spec.GiteaConfigURL, token), nil
 }
 
 // handleDeletion handles the dual finalizer logic for runner teardown.
@@ -271,6 +427,10 @@ func (r *EphemeralRunnerReconciler) constructPod(ctx context.Context, runner *gi
 		Spec: corev1.PodSpec{
 			ServiceAccountName: "gitea-runner",
 			RestartPolicy:      corev1.RestartPolicyNever,
+			// ADR 0008: the resolved hard cap, kubelet-enforced independent of any
+			// operator logic. nil (unset) means no cap, matching the resolver's
+			// "no default configured" case.
+			ActiveDeadlineSeconds: runner.Spec.ActiveDeadlineSeconds,
 			Containers: []corev1.Container{
 				{
 					Name:  "act-runner",
@@ -360,10 +520,18 @@ func (r *EphemeralRunnerReconciler) updateRunnerStatusFromPod(ctx context.Contex
 			return
 		}
 
+		// ADR 0008: PhaseStartTime marks entry into the phase, so it only moves when the
+		// phase itself changes -- a Reason-only update (e.g. a new Pending message for
+		// the same underlying wait) must not reset the pending/stall clock.
+		phaseChanged := latest.Status.Phase != newPhase
+
 		// Update status on the latest version.
 		latest.Status.Phase = newPhase
 		latest.Status.Reason = newReason
 		latest.Status.LastObservedTime = &now
+		if phaseChanged || latest.Status.PhaseStartTime == nil {
+			latest.Status.PhaseStartTime = &now
+		}
 
 		if err := r.Status().Update(ctx, latest); err != nil {
 			if apierrors.IsConflict(err) {

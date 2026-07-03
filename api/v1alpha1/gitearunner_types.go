@@ -68,6 +68,25 @@ type GiteaRunnerSetSpec struct {
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Template *runtime.RawExtension `json:"template,omitempty"`
+
+	// ActiveDeadlineSeconds overrides the manager-wide default hard cap on total runner
+	// pod lifetime (ADR 0008). Set as the Pod's activeDeadlineSeconds; the kubelet
+	// enforces it independent of any operator logic. Omit to use the manager default.
+	// +optional
+	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
+
+	// StallWindow overrides the manager-wide default stall-detection window (ADR 0008):
+	// how long a Running runner may show no progress signal (pod-phase/condition
+	// transitions) before the operator treats the job as stuck, fails it, and tears the
+	// runner down. Omit to use the manager default.
+	// +optional
+	StallWindow *metav1.Duration `json:"stallWindow,omitempty"`
+
+	// PendingTimeout overrides the manager-wide default for how long a runner may stay
+	// Pending (never claimed a job) before the operator treats pod creation as failed
+	// and retries with capped backoff (ADR 0008). Omit to use the manager default.
+	// +optional
+	PendingTimeout *metav1.Duration `json:"pendingTimeout,omitempty"`
 }
 
 // GiteaRunnerSetStatus defines the observed state of GiteaRunnerSet.
