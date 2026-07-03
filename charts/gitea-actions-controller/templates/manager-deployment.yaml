@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-manager
+spec:
+  replicas: {{ .Values.manager.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-manager
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-manager
+    spec:
+      serviceAccountName: {{ .Release.Name }}-manager
+      securityContext:
+        {{- toYaml .Values.securityContext.pod | nindent 8 }}
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/manager"]
+          args:
+            - --leader-elect={{ .Values.manager.leaderElection.enabled }}
+            - --default-active-deadline-seconds={{ .Values.manager.timeouts.defaultActiveDeadlineSeconds }}
+            - --default-stall-window={{ .Values.manager.timeouts.defaultStallWindow }}
+            - --default-pending-timeout={{ .Values.manager.timeouts.defaultPendingTimeout }}
+          ports:
+            - containerPort: 8080
+              name: metrics
+            - containerPort: 8081
+              name: health
+          securityContext:
+            {{- toYaml .Values.securityContext.container | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.manager.resources | nindent 12 }}

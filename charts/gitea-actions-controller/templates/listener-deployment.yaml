@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-listener
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-listener
+spec:
+  replicas: {{ .Values.listener.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-listener
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-listener
+    spec:
+      serviceAccountName: {{ .Release.Name }}-listener
+      securityContext:
+        {{- toYaml .Values.securityContext.pod | nindent 8 }}
+      containers:
+        - name: listener
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/listener"]
+          args:
+            - --poll-interval={{ .Values.listener.pollInterval }}
+          securityContext:
+            {{- toYaml .Values.securityContext.container | nindent 12 }}
+          resources:
+            {{- toYaml .Values.listener.resources | nindent 12 }}
