@@ -35,6 +35,7 @@ import (
 
 	giteaactionsv1alpha1 "github.com/f33rx/gitea-act-runner-controller/api/v1alpha1"
 	"github.com/f33rx/gitea-act-runner-controller/internal/gitea"
+	"github.com/f33rx/gitea-act-runner-controller/internal/metrics"
 )
 
 const (
@@ -172,6 +173,13 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	if timedOut, reason := r.checkTimeout(latest); timedOut {
 		log.Info("runner timed out, deleting", "runner", latest.Name, "reason", reason)
+		// ADR 0010: counted by which checkTimeout branch fired, using the same
+		// phase discriminator checkTimeout itself switches on.
+		if latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning {
+			metrics.RunnerStalledTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace).Inc()
+		} else {
+			metrics.RunnerPendingTimeoutTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace).Inc()
+		}
 		if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
 			log.Error(err, "failed to delete timed-out runner")
 			return ctrl.Result{Requeue: true}, err
@@ -541,6 +549,18 @@ func (r *EphemeralRunnerReconciler) updateRunnerStatusFromPod(ctx context.Contex
 			}
 			log.Error(err, "failed to update EphemeralRunner status")
 			return
+		}
+		// ADR 0010: counted once, on the attempt that actually wrote the phase change
+		// (not merely computed it), so a conflict-retry never double-counts.
+		if phaseChanged {
+			switch newPhase {
+			case giteaactionsv1alpha1.EphemeralRunnerRunning:
+				metrics.JobStartedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace).Inc()
+			case giteaactionsv1alpha1.EphemeralRunnerSucceeded:
+				metrics.JobCompletedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace, "succeeded").Inc()
+			case giteaactionsv1alpha1.EphemeralRunnerFailed:
+				metrics.JobCompletedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace, "failed").Inc()
+			}
 		}
 		return // Success
 	}

@@ -102,6 +102,11 @@ type GiteaRunnerSetStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=grs;grsets
+// +kubebuilder:printcolumn:name="Min",type=integer,JSONPath=`.spec.minRunners`
+// +kubebuilder:printcolumn:name="Max",type=integer,JSONPath=`.spec.maxRunners`
+// +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
+// +kubebuilder:printcolumn:name="Available",type=integer,JSONPath=`.status.availableReplicas`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type GiteaRunnerSet struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

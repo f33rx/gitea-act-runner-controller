@@ -115,6 +115,11 @@ type EphemeralRunnerStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=er;ers
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Pod",type=string,JSONPath=`.status.podName`
+// +kubebuilder:printcolumn:name="Job",type=string,JSONPath=`.status.jobRef`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.reason`,priority=1
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type EphemeralRunner struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
