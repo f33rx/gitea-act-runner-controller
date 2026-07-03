@@ -42,6 +42,13 @@ import (
 type EphemeralRunnerSetReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// ADR 0008: manager-wide timeout defaults, used when a GiteaRunnerSet does not
+	// override them. Zero/nil means "no default configured" for that knob (e.g. a
+	// zero DefaultActiveDeadlineSeconds means no hard cap unless a set opts in).
+	DefaultActiveDeadlineSeconds int64
+	DefaultStallWindow           time.Duration
+	DefaultPendingTimeout        time.Duration
 }
 
 //+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunnersets,verbs=get;list;watch;create;update;patch;delete
@@ -152,6 +159,17 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// effective floor of live pods max(desiredCount, busyCount) until they drain -- the
 	// Gitea-ephemeral analogue of ARC's "decreasing desired replicas never terminates a
 	// running job."
+	//
+	// registrationGracePeriod guards a status-lag race (garc-x32, live-found 2026-07-02):
+	// the act_runner container can start, register with Gitea, and claim a job within a
+	// few seconds -- comfortably faster than this CR's own Status.Phase catching up to
+	// Running via the next Pod-watch reconcile. Without a grace period, a runner that has
+	// ALREADY claimed a task can still read back as phase=="" or Pending here and be
+	// deleted as "idle", stranding the Gitea task at status=running forever (no runner
+	// left to finish it; the orphan sweep only deregisters the runner row, not the task).
+	// A newer runner is therefore never scale-down-eligible regardless of its cached
+	// phase, closing the race without needing a live busy-signal read on this hot path.
+	const registrationGracePeriod = 15 * time.Second
 	if currentCount > desiredCount && ers.Spec.PatchID != 0 {
 		toDelete := currentCount - desiredCount
 		deleted := int32(0)
@@ -160,6 +178,11 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 				break
 			}
 			runner := &ownedRunners.Items[i]
+			if age := time.Since(runner.CreationTimestamp.Time); age < registrationGracePeriod {
+				log.V(1).Info("skipping scale-down of newly-created runner (registration grace period)",
+					"runner", runner.Name, "age", age)
+				continue
+			}
 			// Only delete idle (never-claimed) runners: Pending phase, or empty phase
 			// with no assigned RunnerID yet. Never delete a Running/Succeeded runner.
 			phase := runner.Status.Phase
@@ -227,16 +250,57 @@ func (r *EphemeralRunnerSetReconciler) constructEphemeralRunner(
 			Namespace: grs.Namespace,
 		},
 		Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
-			GiteaConfigURL:     grs.Spec.GiteaConfigURL,
-			RegistrationToken:  regToken,
-			Labels:             grs.Spec.Labels,
-			RunnerScope:        grs.Spec.RunnerScope,
-			OrgName:            grs.Spec.OrgName,
-			GiteaRunnerSetName: ersName,
+			GiteaConfigURL:        grs.Spec.GiteaConfigURL,
+			RegistrationToken:     regToken,
+			Labels:                grs.Spec.Labels,
+			RunnerScope:           grs.Spec.RunnerScope,
+			OrgName:               grs.Spec.OrgName,
+			GiteaRunnerSetName:    ersName,
+			ActiveDeadlineSeconds: r.resolveActiveDeadlineSeconds(grs),
+			StallWindow:           r.resolveStallWindow(grs),
+			PendingTimeout:        r.resolvePendingTimeout(grs),
 		},
 	}
 
 	return runner
+}
+
+// resolveActiveDeadlineSeconds resolves the hard-cap override per ADR 0008 Decision 6:
+// the GiteaRunnerSet's own value if set, else the manager-wide default (nil if that is
+// also unset, meaning no hard cap).
+func (r *EphemeralRunnerSetReconciler) resolveActiveDeadlineSeconds(grs *giteaactionsv1alpha1.GiteaRunnerSet) *int64 {
+	if grs.Spec.ActiveDeadlineSeconds != nil {
+		return grs.Spec.ActiveDeadlineSeconds
+	}
+	if r.DefaultActiveDeadlineSeconds > 0 {
+		v := r.DefaultActiveDeadlineSeconds
+		return &v
+	}
+	return nil
+}
+
+// resolveStallWindow resolves the stall-detection window override per ADR 0008
+// Decision 6.
+func (r *EphemeralRunnerSetReconciler) resolveStallWindow(grs *giteaactionsv1alpha1.GiteaRunnerSet) *metav1.Duration {
+	if grs.Spec.StallWindow != nil {
+		return grs.Spec.StallWindow
+	}
+	if r.DefaultStallWindow > 0 {
+		return &metav1.Duration{Duration: r.DefaultStallWindow}
+	}
+	return nil
+}
+
+// resolvePendingTimeout resolves the pre-claim (Pending) timeout override per ADR 0008
+// Decision 6.
+func (r *EphemeralRunnerSetReconciler) resolvePendingTimeout(grs *giteaactionsv1alpha1.GiteaRunnerSet) *metav1.Duration {
+	if grs.Spec.PendingTimeout != nil {
+		return grs.Spec.PendingTimeout
+	}
+	if r.DefaultPendingTimeout > 0 {
+		return &metav1.Duration{Duration: r.DefaultPendingTimeout}
+	}
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -42,6 +42,13 @@ spec:
           spec:
             description: GiteaRunnerSetSpec defines the desired state of GiteaRunnerSet.
             properties:
+              activeDeadlineSeconds:
+                description: |-
+                  ActiveDeadlineSeconds overrides the manager-wide default hard cap on total runner
+                  pod lifetime (ADR 0008). Set as the Pod's activeDeadlineSeconds; the kubelet
+                  enforces it independent of any operator logic. Omit to use the manager default.
+                format: int64
+                type: integer
               giteaConfigSecretRef:
                 description: GiteaConfigSecretRef is a reference to the Secret containing
                   the Gitea operator credential.
@@ -83,11 +90,24 @@ spec:
                 description: OrgName is the Gitea organization name (for org-scoped
                   runners).
                 type: string
+              pendingTimeout:
+                description: |-
+                  PendingTimeout overrides the manager-wide default for how long a runner may stay
+                  Pending (never claimed a job) before the operator treats pod creation as failed
+                  and retries with capped backoff (ADR 0008). Omit to use the manager default.
+                type: string
               runnerScope:
                 description: 'RunnerScope is the scope of the runner: org or instance.'
                 enum:
                 - org
                 - instance
+                type: string
+              stallWindow:
+                description: |-
+                  StallWindow overrides the manager-wide default stall-detection window (ADR 0008):
+                  how long a Running runner may show no progress signal (pod-phase/condition
+                  transitions) before the operator treats the job as stuck, fails it, and tears the
+                  runner down. Omit to use the manager default.
                 type: string
               template:
                 description: |-
