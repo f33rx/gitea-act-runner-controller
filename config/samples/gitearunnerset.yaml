@@ -36,6 +36,8 @@ metadata:
   namespace: default
 type: Opaque
 stringData:
+  # Gitea access token with read:organization (queue polling, registration tokens)
+  # and read:repository (stall liveness reads job-log sizes; ADR 0006/0008).
   token: "YOUR_ORG_TOKEN_HERE"
 ---
 apiVersion: v1
