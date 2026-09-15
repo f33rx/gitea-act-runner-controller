@@ -15,13 +15,13 @@ kind: ClusterRole
 metadata:
   name: gitea-listener
 rules:
-  - apiGroups: ["giteaactions.blackrabbit.dev"]
+  - apiGroups: ["giteaactions.blackrabbitpursuits.com"]
     resources: ["gitearunnersets"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["giteaactions.blackrabbit.dev"]
+  - apiGroups: ["giteaactions.blackrabbitpursuits.com"]
     resources: ["ephemeralrunnersets"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
-  - apiGroups: ["giteaactions.blackrabbit.dev"]
+  - apiGroups: ["giteaactions.blackrabbitpursuits.com"]
     resources: ["ephemeralrunnersets/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: [""]

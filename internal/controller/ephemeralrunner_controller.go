@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	finalizerEphemeralRunner = "giteaactions.blackrabbit.dev/ephemeral-runner"
+	finalizerEphemeralRunner = "giteaactions.blackrabbitpursuits.com/ephemeral-runner"
 	secretSuffixToken        = "-token"
 	envGiteaToken            = "GITEA_TOKEN"
 	envGiteaServerURL        = "GITEA_SERVER_URL"
@@ -52,10 +52,10 @@ type EphemeralRunnerReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunners,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunners/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunners/finalizers,verbs=update
-//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=gitearunnersets,verbs=get;list;watch
+//+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunners,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunners/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunners/finalizers,verbs=update
+//+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=gitearunnersets,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 

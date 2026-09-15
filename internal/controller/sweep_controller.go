@@ -58,8 +58,8 @@ var (
 	_ manager.LeaderElectionRunnable = &SweepReconciler{}
 )
 
-//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=gitearunnersets,verbs=get;list;watch
-//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunners,verbs=get;list;watch
+//+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=gitearunnersets,verbs=get;list;watch
+//+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunners,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 

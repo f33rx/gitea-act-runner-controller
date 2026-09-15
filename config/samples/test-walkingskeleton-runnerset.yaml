@@ -1,4 +1,4 @@
-apiVersion: giteaactions.blackrabbit.dev/v1alpha1
+apiVersion: giteaactions.blackrabbitpursuits.com/v1alpha1
 kind: GiteaRunnerSet
 metadata:
   name: test-set

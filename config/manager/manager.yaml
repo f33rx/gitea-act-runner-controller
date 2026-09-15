@@ -24,27 +24,27 @@ metadata:
   name: gitea-runner-controller
 rules:
 # EphemeralRunner
-- apiGroups: ["giteaactions.blackrabbit.dev"]
+- apiGroups: ["giteaactions.blackrabbitpursuits.com"]
   resources: ["ephemeralrunners"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["giteaactions.blackrabbit.dev"]
+- apiGroups: ["giteaactions.blackrabbitpursuits.com"]
   resources: ["ephemeralrunners/status"]
   verbs: ["get", "update", "patch"]
-- apiGroups: ["giteaactions.blackrabbit.dev"]
+- apiGroups: ["giteaactions.blackrabbitpursuits.com"]
   resources: ["ephemeralrunners/finalizers"]
   verbs: ["update"]
 # GiteaRunnerSet
-- apiGroups: ["giteaactions.blackrabbit.dev"]
+- apiGroups: ["giteaactions.blackrabbitpursuits.com"]
   resources: ["gitearunnersets"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["giteaactions.blackrabbit.dev"]
+- apiGroups: ["giteaactions.blackrabbitpursuits.com"]
   resources: ["gitearunnersets/status"]
   verbs: ["get", "update", "patch"]
 # EphemeralRunnerSet
-- apiGroups: ["giteaactions.blackrabbit.dev"]
+- apiGroups: ["giteaactions.blackrabbitpursuits.com"]
   resources: ["ephemeralrunnersets"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["giteaactions.blackrabbit.dev"]
+- apiGroups: ["giteaactions.blackrabbitpursuits.com"]
   resources: ["ephemeralrunnersets/status"]
   verbs: ["get", "update", "patch"]
 # Core resources

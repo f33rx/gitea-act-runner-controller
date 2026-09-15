@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.14.0
-  name: gitearunnersets.giteaactions.blackrabbit.dev
+  name: gitearunnersets.giteaactions.blackrabbitpursuits.com
 spec:
-  group: giteaactions.blackrabbit.dev
+  group: giteaactions.blackrabbitpursuits.com
   names:
     kind: GiteaRunnerSet
     listKind: GiteaRunnerSetList
