@@ -92,6 +92,11 @@ teardownCredential:
 giteaRunnerSet:
   enabled: false
   giteaConfigUrl: ""
+  # giteaConfigSecretRef names the runner set's read credential (ADR 0006): a Gitea
+  # access token with read:organization (listener queue polling, registration tokens)
+  # AND read:repository (ADR 0008 stall liveness reads the job-log byte length, a
+  # repo-scoped endpoint; without it stall detection never fires). Pre-create the
+  # Secret; the chart does not render it.
   giteaConfigSecretRef:
     name: ""
     key: token
