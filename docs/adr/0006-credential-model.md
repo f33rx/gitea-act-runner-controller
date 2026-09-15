@@ -99,12 +99,20 @@ each is scoped as narrowly as the deployment allows. There are two supported sco
 tiers; **org-scoped is the recommended default** (spike garc-3bk, live-confirmed):
 
 **Recommended -- org-scoped (no admin scope at all):**
-- **Listener credential -- `read:organization`.** Reads the demand queue via
+- **Read credential (the `GiteaRunnerSet` secret) -- `read:organization` +
+  `read:repository`.** The listener reads the demand queue via
   `GET /api/v1/orgs/{org}/actions/jobs?status=queued` (live-confirmed: 200, status
   filter honored, `labels[]` populated, `X-Total-Count` present, results correctly
-  scoped to the org's repos). Can read that org's queue and nothing more. The listener's
-  topology and ownership (one per `GiteaRunnerSet`, owner-referenced, stateless) are
-  specified in ADR 0007; this Secret is mounted only into that listener pod.
+  scoped to the org's repos). The listener's topology and ownership (one per
+  `GiteaRunnerSet`, owner-referenced, stateless) are specified in ADR 0007.
+  *Amended 2026-09-15:* the same secret is also read by the `EphemeralRunner`
+  reconciler for ADR 0008's stall liveness check, which reads the byte length of
+  `GET /api/v1/repos/{owner}/{repo}/actions/jobs/{id}/logs`. That endpoint is
+  repo-scoped: a token with only `read:organization`/`write:organization` gets 403
+  (`required=[read:repository]`, verified on Gitea 1.26.1), and without it stall
+  detection fails open (never fires). `read:repository` on the read credential is the
+  accepted cost; it grants read access to the org's repositories, which the operator
+  uses only for log size, never content (ADR 0008 Decision 2).
 - **Teardown credential -- `write:organization`.** The reconcile/teardown controller
   deletes orphaned rows via `DELETE /api/v1/orgs/{org}/actions/runners/{id}`
   (live-confirmed: **204** with a `write:organization` token, no `write:admin`).
@@ -213,10 +221,10 @@ instance scope.
 - **Per-pod tokens are never rotated in place.** Every pod gets a fresh registration
   token at creation, and there is nothing long-lived in a pod to rotate. Pod lifecycle
   is the rotation mechanism.
-- **The operator's own Gitea credentials** -- the listener read token and the teardown
-  write token, in whichever tier the deployment uses (`read:organization` /
-  `write:organization` by default, `read:admin` / `write:admin` in the whole-instance
-  fallback) -- are **rotated out-of-band** via an external secret store (e.g. External
+- **The operator's own Gitea credentials** -- the read token and the teardown
+  write token, in whichever tier the deployment uses (`read:organization` +
+  `read:repository` / `write:organization` by default, `read:admin` / `write:admin` in
+  the whole-instance fallback) -- are **rotated out-of-band** via an external secret store (e.g. External
   Secrets Operator / a vault) or manual rotation, and this procedure is documented for
   the security/compliance persona (Dana). The operator reads each from its Secret on each
   use, so an external rotation of the underlying Secret is picked up without a code
@@ -227,7 +235,8 @@ instance scope.
 ### Positive
 
 - **Least privilege by component.** The continuously-exposed listener holds only the
-  read credential (`read:organization` by default, `read:admin` in the fallback tier);
+  read credential (`read:organization` + `read:repository` by default, `read:admin` in
+  the fallback tier);
   write scope is never co-located with the network-facing poller. A listener compromise
   cannot delete runners or mutate Gitea.
 - **No high-value credential in untrusted pods.** Runner pods, which execute untrusted
