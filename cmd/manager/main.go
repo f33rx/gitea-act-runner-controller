@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,11 +49,29 @@ func main() {
 	var metricsAddr string
 	var probeAddr string
 	var enableLeaderElection bool
+	var defaultActiveDeadlineSeconds int64
+	var defaultStallWindow time.Duration
+	var defaultPendingTimeout time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. Required for HA (multi-replica) deployments so "+
 			"leader-election-gated components such as the sweep run on only one replica at a time.")
+	// ADR 0008: manager-wide timeout defaults. A GiteaRunnerSet can override any of
+	// these; 0 here means "no default for that knob" (e.g. no hard cap unless a set
+	// opts in). Defaults are deliberately conservative (see ADR 0008 Open question 1
+	// for tuning); false-negative (wait longer) is preferred over false-positive
+	// (kill a legitimately slow job).
+	flag.Int64Var(&defaultActiveDeadlineSeconds, "default-active-deadline-seconds", 0,
+		"Default hard cap (seconds) on total EphemeralRunner pod lifetime, kubelet-enforced. "+
+			"0 = no default cap unless a GiteaRunnerSet sets activeDeadlineSeconds itself.")
+	flag.DurationVar(&defaultStallWindow, "default-stall-window", 15*time.Minute,
+		"Default duration a Running EphemeralRunner may show no phase-change progress before "+
+			"it is presumed stuck and torn down. 0 disables stall detection by default.")
+	flag.DurationVar(&defaultPendingTimeout, "default-pending-timeout", 5*time.Minute,
+		"Default duration an EphemeralRunner may stay Pending (never claimed a job) before "+
+			"it is deleted and retried with backoff by the owning EphemeralRunnerSet. "+
+			"0 disables pending-timeout detection by default.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -92,8 +111,11 @@ func main() {
 	}
 
 	if err = (&controller.EphemeralRunnerSetReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:                       mgr.GetClient(),
+		Scheme:                       mgr.GetScheme(),
+		DefaultActiveDeadlineSeconds: defaultActiveDeadlineSeconds,
+		DefaultStallWindow:           defaultStallWindow,
+		DefaultPendingTimeout:        defaultPendingTimeout,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EphemeralRunnerSet")
 		os.Exit(1)
