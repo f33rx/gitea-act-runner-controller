@@ -230,6 +230,10 @@ func (c *Client) JobLogSize(jobURL string) (int64, error) {
 		return 0, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
+	// Without this the transport advertises gzip on our behalf; when the reply comes
+	// back compressed it strips Content-Length and reports -1, which the caller cannot
+	// distinguish from "log did not grow".
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -239,6 +243,9 @@ func (c *Client) JobLogSize(jobURL string) (int64, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("job log request failed with status %d", resp.StatusCode)
+	}
+	if resp.ContentLength < 0 {
+		return 0, fmt.Errorf("job log response has unknown length (Content-Encoding %q)", resp.Header.Get("Content-Encoding"))
 	}
 	return resp.ContentLength, nil
 }

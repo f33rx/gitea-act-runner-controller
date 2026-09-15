@@ -43,6 +43,7 @@ const (
 	envGiteaToken            = "GITEA_TOKEN"
 	envGiteaServerURL        = "GITEA_SERVER_URL"
 	envGiteaEphemeral        = "GITEA_RUNNER_EPHEMERAL"
+	envGiteaRunnerName       = "GITEA_RUNNER_NAME"
 	envGiteaRunnerOrgName    = "GITEA_RUNNER_ORG_NAME"
 )
 
@@ -174,7 +175,7 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		log.Error(err, "failed to refetch runner for timeout check")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
-	if latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning {
+	if latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning && latest.Spec.StallWindow != nil {
 		if err := r.recordLogProgress(ctx, latest); err != nil {
 			// Fail open: with no usable liveness signal the PhaseStartTime fallback would
 			// condemn every job longer than the stall window (a credential without
@@ -244,10 +245,10 @@ func (r *EphemeralRunnerReconciler) checkTimeout(runner *giteaactionsv1alpha1.Ep
 // presumed alive, resetting the stall clock. act_runner ships step output to Gitea via
 // its own UpdateLog/gRPC protocol independent of the runner container's stdout, so this
 // reads Gitea's job-log endpoint rather than kubectl logs. Errors (credential lookup,
-// API failures, no matching job yet) are logged and swallowed -- a transient failure
-// must not itself look like a stall, so they are returned and the caller skips the
-// stall check for that cycle. A nil return with no matching in-progress job leaves
-// checkTimeout on its PhaseStartTime fallback.
+// API failures, an unreadable log size, a status write that would not land) are
+// returned so the caller skips the stall check for that cycle: a transient failure must
+// not itself look like a stall. Only the "no matching in-progress job yet" case returns
+// nil, leaving checkTimeout on its PhaseStartTime fallback.
 func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner) error {
 	log := log.FromContext(ctx)
 
@@ -261,16 +262,28 @@ func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runne
 		return fmt.Errorf("list in-progress jobs: %w", err)
 	}
 
-	var jobURL, jobStartedAt string
+	// act_runner registers under the EphemeralRunner name (constructPod pins
+	// GITEA_RUNNER_NAME), and Status.RunnerID is never populated, so the name is the
+	// reliable key. Names are reused across generations and a job whose runner was torn
+	// down stays in_progress until Gitea's zombie reaper runs, so among name matches take
+	// the most recently started one. Parse rather than compare strings: Gitea renders
+	// started_at in its configured UI timezone, whose numeric offset shifts across DST,
+	// and lexical order inverts at the transition.
+	var jobURL string
+	var jobStartedAt time.Time
 	for _, job := range jobs {
-		// act_runner registers under the EphemeralRunner name (the pod's RUNNER_NAME),
-		// and Status.RunnerID is never populated, so the name is the reliable key.
-		// Runner names are reused across generations, and a job whose runner was torn
-		// down stays in_progress until Gitea's zombie timeout reaps it, so among name
-		// matches take the most recently started one (RFC3339 sorts lexically).
-		if job.RunnerName == runner.Name && job.StartedAt > jobStartedAt {
+		if job.RunnerName != runner.Name {
+			continue
+		}
+		started, err := time.Parse(time.RFC3339, job.StartedAt)
+		if err != nil {
+			log.V(1).Info("skipping in-progress job with unparseable started_at",
+				"runner", runner.Name, "startedAt", job.StartedAt)
+			continue
+		}
+		if jobURL == "" || started.After(jobStartedAt) {
 			jobURL = job.URL
-			jobStartedAt = job.StartedAt
+			jobStartedAt = started
 		}
 	}
 	if jobURL == "" {
@@ -291,8 +304,7 @@ func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runne
 	for i := 0; i < 3; i++ {
 		latest := &giteaactionsv1alpha1.EphemeralRunner{}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: runner.Namespace, Name: runner.Name}, latest); err != nil {
-			log.Error(err, "failed to refetch runner for log-progress update")
-			return nil
+			return fmt.Errorf("refetch runner for log-progress update: %w", err)
 		}
 		latest.Status.LastProgressTime = &now
 		latest.Status.LastJobLogSize = size
@@ -300,8 +312,9 @@ func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runne
 			if apierrors.IsConflict(err) && i < 2 {
 				continue
 			}
-			log.Error(err, "failed to update runner log-progress status")
-			return nil
+			// Observed growth we could not persist: report it so the caller skips the
+			// stall check rather than measuring against a stale anchor.
+			return fmt.Errorf("update runner log-progress status: %w", err)
 		}
 		runner.Status.LastProgressTime = &now
 		runner.Status.LastJobLogSize = size
@@ -473,6 +486,14 @@ func (r *EphemeralRunnerReconciler) constructPod(ctx context.Context, runner *gi
 						{
 							Name:  "GITEA_RUNNER_EPHEMERAL",
 							Value: "1",
+						},
+						{
+							// Pin the registered name instead of letting act_runner fall
+							// back to the pod hostname: the kubelet truncates hostnames at
+							// 63 chars, and recordLogProgress matches in-progress jobs by
+							// this name.
+							Name:  envGiteaRunnerName,
+							Value: runner.Name,
 						},
 						{
 							Name:  "GITEA_RUNNER_LABELS",
