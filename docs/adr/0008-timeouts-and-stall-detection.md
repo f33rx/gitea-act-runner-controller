@@ -79,9 +79,13 @@ v1's progress signal is therefore:
 
 1. **Job discovery**: `GET /orgs/{org}/actions/jobs?status=in_progress` (a single
    org-scoped call, confirmed working; per-repo enumeration is unnecessary) returns
-   each in-progress job's `url` and `runner_id`. The operator matches on
-   `runner_id == EphemeralRunner.status.runnerID`.
-2. **Liveness check**: `GET {job.url}/logs`, reading only the `Content-Length` header
+   each in-progress job's `url` and `runner_name`. The operator matches on
+   `runner_name == EphemeralRunner.metadata.name` (the name act_runner registers
+   under); `status.runnerID` is never populated by the operator, so it is not a
+   usable key.
+2. **Liveness check**: `GET {job.url path}/logs` against the runner set's configured
+   Gitea URL (Gitea renders `job.url` from its browser-facing `ROOT_URL`, which is not
+   necessarily reachable from inside the cluster), reading only the `Content-Length` header
    (confirmed present; the endpoint does not support `HEAD`, so a `GET` is issued and
    the body is discarded unread) and comparing it against the last observed size
    (`EphemeralRunnerStatus.lastJobLogSize`). Growth updates `lastProgressTime` and
@@ -89,10 +93,15 @@ v1's progress signal is therefore:
    stored, or exposed beyond the byte-length comparison.
 
 No new credential *type* is introduced: the operator reuses the parent
-`GiteaRunnerSet`'s existing `GiteaConfigSecretRef` (the same read-oriented credential
-ADR 0006 already scopes for the listener). `EphemeralRunner`'s reconciler does gain a
-new access path, though -- it now needs read access to `GiteaRunnerSet` itself (RBAC:
-`get;list;watch` on `gitearunnersets`) to resolve that secret reference. This is a
+`GiteaRunnerSet`'s existing `GiteaConfigSecretRef`. That credential does, however,
+need one scope beyond ADR 0006's org-only set: Gitea's job-log endpoint is
+repo-scoped and rejects a `write:organization`-only token with 403
+(`required=[read:repository]`, verified live 2026-09-15 on Gitea 1.26.1), so the
+operator token must also carry **`read:repository`**. The dev seed grants it; deploy
+docs and ADR 0006 need the same amendment. Without it the liveness signal is
+unavailable and stall detection fails open (below). `EphemeralRunner`'s reconciler
+also gains a new access path -- it now needs read access to `GiteaRunnerSet` itself
+(RBAC: `get;list;watch` on `gitearunnersets`) to resolve that secret reference. This is a
 deliberate, narrower departure from the "operator owns infra status only" boundary in
 Decision 2's original form: the operator reads Gitea's job-log *existence/size*, never
 its content, purely as a liveness signal -- Gitea remains the sole owner of log
@@ -102,10 +111,20 @@ content and job/task status semantics.
 (4 polls, 5s apart, against an actively-running step) that it does not move during
 step execution -- it is a last-transition timestamp, not a heartbeat.
 
-If `lastProgressTime`/`lastJobLogSize` are unavailable (credential lookup failure, no
-matching in-progress job yet, a transient API error), `checkTimeout` falls back to
-`PhaseStartTime` so a transient signal-read failure degrades to the coarser
-pod-phase-only check rather than disabling stall detection entirely.
+If the liveness read itself fails (credential lookup failure, Gitea API error such
+as the 403 above), the stall check is **skipped for that reconcile** and the failure
+is logged at Info. Falling back to `PhaseStartTime` here was tried first and killed
+every healthy job longer than the stall window under a mis-scoped token (verified
+live: a 70s job ticking output every 5s was torn down at 20s), which is the exact
+false positive Decision 3 forbids. Only the "no matching in-progress job yet" case
+(a Running pod that has not claimed) falls back to `PhaseStartTime`.
+
+Matching a runner to its job uses `runner_name` (act_runner registers under the
+`EphemeralRunner` name). Names are reused across generations and a job whose runner
+was torn down stays `in_progress` until Gitea's zombie reaper runs, so the most
+recently started name match wins. `job.url` is rendered from Gitea's `ROOT_URL`, which
+is browser-facing and not necessarily reachable in-cluster (dev: `localhost:3000`), so
+only its path is used, against the runner set's configured Gitea URL.
 
 ### 3. Stall window action: fail and tear down, default to false-negative over false-positive
 
@@ -149,7 +168,10 @@ retrying a claimed task would mean two runners could believe they own the same t
 which the scaling ADR's ephemeral-one-job-per-runner model forbids.
 
 Capped backoff for pre-claim retries: exponential, small cap (proposed: 15s, 30s, 60s,
-then hold at 60s), bounded attempt count is deliberately **not** set -- an
+then hold at 60s) -- **not implemented in v1**: the `EphemeralRunnerSet` recreates a
+deleted runner immediately, so the effective retry interval is the pending timeout
+itself plus the reconcile requeue (verified live: 20s cadence at a 15s timeout).
+A bounded attempt count is deliberately **not** set -- an
 unschedulable pod should keep retrying until cluster capacity returns, not give up
 and silently drop demand (consistent with 0007's "never silently drop demand" scale-up
 principle). A persistently-failing pod is visible via the metrics this hardening slice
@@ -185,8 +207,9 @@ it later without a breaking change (the `GiteaRunnerSet`-level fields become the
 - True job-log liveness (not just pod-phase) catches a job wedged mid-step, not only a
   job whose pod-level state never changes -- closing the false-negative gap the
   pod-phase-only design left open.
-- Reuses the existing `GiteaRunnerSet.spec.GiteaConfigSecretRef` credential (same
-  read-oriented scope as the listener, ADR 0006); no new secret type introduced.
+- Reuses the existing `GiteaRunnerSet.spec.GiteaConfigSecretRef` credential; no new
+  secret type introduced, but it must carry `read:repository` in addition to ADR
+  0006's org scopes (Decision 2).
 - Pre-claim retry reuses the existing EphemeralRunnerSet recreate-on-delete behavior;
   no new retry machinery.
 
@@ -194,8 +217,11 @@ it later without a breaking change (the `GiteaRunnerSet`-level fields become the
 
 - `EphemeralRunner`'s reconciler now needs `get;list;watch` RBAC on `GiteaRunnerSet`
   and makes outbound Gitea API calls on every Running-phase reconcile, a small new
-  surface (credential lookup, API errors) that Decision 2's fallback to
-  `PhaseStartTime` is designed to fail safe against.
+  surface (credential lookup, API errors) that Decision 2 fails open against: a broken
+  liveness read disables stall detection for that runner rather than condemning it.
+- The kubelet enforces `activeDeadlineSeconds` on its pod sync loop, so the hard cap
+  can overshoot by up to the sync period (verified live: a 30s cap fired at ~65s).
+  It is a backstop, not a precise timer.
 - Two new timeout knobs (+pending timeout) with sane-but-arguable defaults; needs
   tuning against real workload duration distributions once the fleet has traffic.
 
