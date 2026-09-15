@@ -89,7 +89,7 @@ var (
 		Namespace: namespace,
 		Subsystem: "job",
 		Name:      "completed_total",
-		Help:      "Total EphemeralRunner transitions into a terminal phase, by result.",
+		Help:      "Total EphemeralRunners reaching a terminal outcome, by result: succeeded, failed, deadline_exceeded (hard cap), stalled (torn down mid-job).",
 	}, []string{"gitearunnerset", "namespace", "result"})
 
 	// RunnerStalledTotal is incremented at checkTimeout's Running-phase fire point

@@ -45,7 +45,17 @@ const (
 	envGiteaServerURL        = "GITEA_SERVER_URL"
 	envGiteaEphemeral        = "GITEA_RUNNER_EPHEMERAL"
 	envGiteaRunnerName       = "GITEA_RUNNER_NAME"
-	envGiteaRunnerOrgName    = "GITEA_RUNNER_ORG_NAME"
+
+	// job_completed_total result labels (ADR 0010). Kept coarse and closed-set so
+	// cardinality stays bounded.
+	resultSucceeded        = "succeeded"
+	resultFailed           = "failed"
+	resultStalled          = "stalled"
+	resultDeadlineExceeded = "deadline_exceeded"
+
+	// The kubelet's pod.status.reason for an activeDeadlineSeconds kill.
+	deadlineExceededReason = "DeadlineExceeded"
+	envGiteaRunnerOrgName  = "GITEA_RUNNER_ORG_NAME"
 )
 
 // EphemeralRunnerReconciler reconciles an EphemeralRunner object.
@@ -134,8 +144,17 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			log.Info("created Pod", "pod", podName)
 			now := metav1.Now()
 			runner.Status.PodName = pod.Name
-			runner.Status.Phase = giteaactionsv1alpha1.EphemeralRunnerPending
-			runner.Status.Reason = "Pod created"
+			// Only a first-time creation starts the Pending clock. If the runner was
+			// already Running its pod was deleted out from under it (node drain, manual
+			// delete): rewinding the phase would make the replacement pod's transition to
+			// Running look like a second job start and double-count started_total, while
+			// the first job's outcome is never counted at all.
+			if runner.Status.Phase == "" || runner.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerPending {
+				runner.Status.Phase = giteaactionsv1alpha1.EphemeralRunnerPending
+				runner.Status.Reason = "Pod created"
+			} else {
+				runner.Status.Reason = "Pod recreated"
+			}
 			// ADR 0008: the Pending clock starts here. updateRunnerStatusFromPod only
 			// writes on a phase/reason change, so if this write lands before the first
 			// Pod event is observed the runner stays Pending with no later transition
@@ -190,10 +209,16 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if timedOut, reason := r.checkTimeout(latest); timedOut {
 		log.Info("runner timed out, deleting", "runner", latest.Name, "reason", reason)
 		// ADR 0010: counted by which checkTimeout branch fired, using the same
-		// phase discriminator checkTimeout itself switches on.
+		// phase discriminator checkTimeout itself switches on. The runner is deleted
+		// here rather than transitioning through a terminal phase, so
+		// updateRunnerStatusFromPod never sees it again -- count the completion here or
+		// a stalled runner inflates started_total with no matching completed_total.
 		if latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning {
 			metrics.RunnerStalledTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace).Inc()
+			metrics.JobCompletedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace, resultStalled).Inc()
 		} else {
+			// A Pending runner never reached Running, so it was never counted as started
+			// and must not be counted as completed.
 			metrics.RunnerPendingTimeoutTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace).Inc()
 		}
 		if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
@@ -558,6 +583,8 @@ func (r *EphemeralRunnerReconciler) updateRunnerStatusFromPod(ctx context.Contex
 		return
 	}
 
+	podReason := pod.Status.Reason
+
 	// Retry on conflict: refetch and update to handle concurrent modifications.
 	// Maximum 3 retries on conflict errors.
 	for i := 0; i < 3; i++ {
@@ -597,9 +624,16 @@ func (r *EphemeralRunnerReconciler) updateRunnerStatusFromPod(ctx context.Contex
 			case giteaactionsv1alpha1.EphemeralRunnerRunning:
 				metrics.JobStartedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace).Inc()
 			case giteaactionsv1alpha1.EphemeralRunnerSucceeded:
-				metrics.JobCompletedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace, "succeeded").Inc()
+				metrics.JobCompletedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace, resultSucceeded).Inc()
 			case giteaactionsv1alpha1.EphemeralRunnerFailed:
-				metrics.JobCompletedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace, "failed").Inc()
+				// The kubelet reports an activeDeadlineSeconds kill as DeadlineExceeded
+				// (ADR 0008's hard cap). Without its own label it is indistinguishable
+				// from an ordinary job failure, and the cap cannot be tuned from metrics.
+				result := resultFailed
+				if podReason == deadlineExceededReason {
+					result = resultDeadlineExceeded
+				}
+				metrics.JobCompletedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace, result).Inc()
 			}
 		}
 		return // Success

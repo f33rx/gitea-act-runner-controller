@@ -97,9 +97,16 @@ already decides the transition happened -- no new detection logic):
   when an `EphemeralRunner` transitions into `Running`
   (`updateRunnerStatusFromPod`'s existing phase-change branch, ADR 0003).
 - `giteaactions_job_completed_total{gitearunnerset, namespace, result}` --
-  incremented once when an `EphemeralRunner` transitions into `Succeeded` or `Failed`
-  (`result` label value `succeeded`/`failed`), at the same auto-teardown decision
-  point that already exists in `ephemeralrunner_controller.go`'s `Reconcile`.
+  incremented once per runner that reaches a terminal outcome. `result` is a closed
+  set: `succeeded` and `failed` from the pod's terminal phase, `deadline_exceeded`
+  when the kubelet reports an `activeDeadlineSeconds` kill (ADR 0008's hard cap, which
+  would otherwise be indistinguishable from an ordinary failure), and `stalled` for a
+  runner torn down mid-job by the stall check. The stall case is counted at the kill
+  site rather than the pod-phase transition: that runner is deleted outright and never
+  reaches a terminal phase, so counting it only at the transition would leave
+  `started_total` permanently ahead of `completed_total`. A pending-timeout deletion is
+  deliberately *not* counted here -- it never reached `Running`, so it was never
+  counted as started.
 - `giteaactions_runner_stalled_total{gitearunnerset, namespace}` and
   `giteaactions_runner_pending_timeout_total{gitearunnerset, namespace}` --
   incremented at `checkTimeout`'s two existing fire points (ADR 0008 Decisions 3-4),
