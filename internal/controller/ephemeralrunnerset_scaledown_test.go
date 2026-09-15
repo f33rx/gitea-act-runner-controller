@@ -37,20 +37,43 @@ func TestScaleDownSafe(t *testing.T) {
 		}
 		return p
 	}
+	// A pod bound to a node but carrying no PodScheduled condition: only reachable from a
+	// hand-built object or a stripped status, and it must not read as safe.
+	mkPodNoCondition := func(node string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "r0", Namespace: "ns"},
+			Spec:       corev1.PodSpec{NodeName: node},
+			Status:     corev1.PodStatus{Phase: corev1.PodPending},
+		}
+	}
+	// Pod phase stays Pending until every container is created, so a running act_runner
+	// container can sit inside a Pending pod while a sidecar still pulls.
+	withRunningContainer := func(p *corev1.Pod) *corev1.Pod {
+		started := true
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:    "act-runner",
+			Started: &started,
+			State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}
+		return p
+	}
 
 	for _, tc := range []struct {
 		name   string
 		runner *giteaactionsv1alpha1.EphemeralRunner
 		pod    *corev1.Pod
 		safe   bool
+		rank   scaleDownRank
 	}{
-		{"young runner is protected", mkRunner(fresh, giteaactionsv1alpha1.EphemeralRunnerPending), nil, false},
-		{"running runner is protected", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerRunning), mkPod(corev1.PodRunning, "n1", old), false},
-		{"old pending runner with no pod is safe", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerPending), nil, true},
-		{"old pending runner, pod unscheduled, is safe", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerPending), mkPod(corev1.PodPending, "", old), true},
-		{"old pending runner, pod just scheduled, is protected (garc-nme)", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerPending), mkPod(corev1.PodPending, "n1", fresh), false},
-		{"old pending runner, pod already Running, is protected (garc-nme)", mkRunner(old, ""), mkPod(corev1.PodRunning, "n1", fresh), false},
-		{"old pending runner, pod scheduled long ago but still Pending, is safe", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerPending), mkPod(corev1.PodPending, "n1", old), true},
+		{"young runner is protected", mkRunner(fresh, giteaactionsv1alpha1.EphemeralRunnerPending), nil, false, 0},
+		{"running runner is protected", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerRunning), mkPod(corev1.PodRunning, "n1", old), false, 0},
+		{"old pending runner with no pod is safe", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerPending), nil, true, rankNoPod},
+		{"old pending runner, pod unscheduled, is safe", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerPending), mkPod(corev1.PodPending, "", old), true, rankUnscheduled},
+		{"old pending runner, pod just scheduled, is protected (garc-nme)", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerPending), mkPod(corev1.PodPending, "n1", fresh), false, 0},
+		{"old runner with empty phase, pod already Running, is protected (garc-nme)", mkRunner(old, ""), mkPod(corev1.PodRunning, "n1", fresh), false, 0},
+		{"old pending runner, pod scheduled long ago but still Pending, is safe", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerPending), mkPod(corev1.PodPending, "n1", old), true, rankScheduledPulling},
+		{"Pending pod whose runner container already started is protected", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerPending), withRunningContainer(mkPod(corev1.PodPending, "n1", old)), false, 0},
+		{"pod bound but carrying no PodScheduled condition is not treated as past grace", mkRunner(old, giteaactionsv1alpha1.EphemeralRunnerPending), mkPodNoCondition("n1"), true, rankUnscheduled},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newTestScheme(t)
@@ -60,9 +83,12 @@ func TestScaleDownSafe(t *testing.T) {
 			}
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 			r := &EphemeralRunnerSetReconciler{Client: c, Scheme: scheme}
-			safe, why := r.scaleDownSafe(context.Background(), tc.runner)
+			safe, rank, why := r.scaleDownSafe(context.Background(), tc.runner)
 			if safe != tc.safe {
 				t.Fatalf("safe = %v (%s), want %v", safe, why, tc.safe)
+			}
+			if safe && rank != tc.rank {
+				t.Fatalf("rank = %v (%s), want %v", rank, why, tc.rank)
 			}
 		})
 	}
