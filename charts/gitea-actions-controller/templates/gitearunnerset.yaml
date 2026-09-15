@@ -1,5 +1,5 @@
 {{- if .Values.giteaRunnerSet.enabled }}
-apiVersion: giteaactions.blackrabbit.dev/v1alpha1
+apiVersion: giteaactions.blackrabbitpursuits.com/v1alpha1
 kind: GiteaRunnerSet
 metadata:
   name: {{ .Release.Name }}

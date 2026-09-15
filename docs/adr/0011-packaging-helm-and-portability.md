@@ -80,9 +80,9 @@ charts/gitea-actions-controller/
   Chart.yaml
   values.yaml
   crds/                          # copied verbatim from config/crd/, not templated
-    giteaactions.blackrabbit.dev_ephemeralrunners.yaml
-    giteaactions.blackrabbit.dev_ephemeralrunnersets.yaml
-    giteaactions.blackrabbit.dev_gitearunnersets.yaml
+    giteaactions.blackrabbitpursuits.com_ephemeralrunners.yaml
+    giteaactions.blackrabbitpursuits.com_ephemeralrunnersets.yaml
+    giteaactions.blackrabbitpursuits.com_gitearunnersets.yaml
   templates/
     manager-serviceaccount.yaml
     manager-rbac.yaml            # Role+RoleBinding OR ClusterRole+ClusterRoleBinding, see Decision 2
