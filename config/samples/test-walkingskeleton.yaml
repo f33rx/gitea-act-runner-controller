@@ -21,7 +21,7 @@ metadata:
   name: gitea-runner
   namespace: gitea-runners
 ---
-apiVersion: giteaactions.blackrabbit.dev/v1alpha1
+apiVersion: giteaactions.blackrabbitpursuits.com/v1alpha1
 kind: EphemeralRunner
 metadata:
   name: test-runner-1

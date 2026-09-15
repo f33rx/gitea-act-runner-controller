@@ -87,7 +87,7 @@ func main() {
 		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "gitea-actions-controller.blackrabbit.dev",
+		LeaderElectionID:       "gitea-actions-controller.blackrabbitpursuits.com",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

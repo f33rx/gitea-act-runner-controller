@@ -139,7 +139,7 @@ kctl -n gitea-runners create serviceaccount gitea-runner \
 kctl -n gitea-runners create secret generic gitea-runner-creds \
   --from-literal=token="${TOKEN}" --dry-run=client -o yaml | kctl apply -f -
 cat <<YAML | kctl apply -f -
-apiVersion: giteaactions.blackrabbit.dev/v1alpha1
+apiVersion: giteaactions.blackrabbitpursuits.com/v1alpha1
 kind: GiteaRunnerSet
 metadata:
   name: test-set

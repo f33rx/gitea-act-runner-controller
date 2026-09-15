@@ -51,10 +51,10 @@ type EphemeralRunnerSetReconciler struct {
 	DefaultPendingTimeout        time.Duration
 }
 
-//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunnersets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunnersets/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunnersets/finalizers,verbs=update
-//+kubebuilder:rbac:groups=giteaactions.blackrabbit.dev,resources=ephemeralrunners,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunnersets,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunnersets/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunnersets/finalizers,verbs=update
+//+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunners,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 // Reconcile implements reconciliation for EphemeralRunnerSet.
