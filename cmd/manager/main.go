@@ -28,10 +28,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	giteaactionsv1alpha1 "github.com/f33rx/gitea-act-runner-controller/api/v1alpha1"
 	"github.com/f33rx/gitea-act-runner-controller/internal/controller"
+	"github.com/f33rx/gitea-act-runner-controller/internal/metrics"
 )
 
 var (
@@ -79,6 +81,10 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// ADR 0010: register the operator's own metrics against controller-runtime's
+	// default registry, the same one the metrics server below already serves.
+	metrics.Register(crmetrics.Registry)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
