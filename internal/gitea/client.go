@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 )
 
 // Client is a minimal Gitea API client for runner teardown operations.
@@ -112,13 +113,17 @@ func (c *Client) ListOrgRunners(org string) ([]Runner, error) {
 
 // Job represents a job from Gitea (queued or in-progress).
 type Job struct {
-	ID        int64    `json:"id"`
-	URL       string   `json:"url"`
-	Name      string   `json:"name"`
-	Status    string   `json:"status"`
-	RunnerID  int64    `json:"runner_id"`
-	Labels    []string `json:"labels"`
-	StartedAt string   `json:"started_at"`
+	ID       int64  `json:"id"`
+	URL      string `json:"url"`
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	RunnerID int64  `json:"runner_id"`
+	// RunnerName is the name act_runner registered under, which the operator sets to
+	// the EphemeralRunner name; the operator never learns runner_id, so this is how an
+	// in-progress job is matched back to its runner.
+	RunnerName string   `json:"runner_name"`
+	Labels     []string `json:"labels"`
+	StartedAt  string   `json:"started_at"`
 }
 
 // ListOrgQueuedJobsResponse is the API response for queued jobs.
@@ -212,11 +217,23 @@ func (c *Client) ListOrgInProgressJobs(org string) ([]Job, error) {
 // live: act_runner streams step output to Gitea via UpdateLog/gRPC independent of the
 // runner container's own stdout, which does NOT carry step output).
 func (c *Client) JobLogSize(jobURL string) (int64, error) {
-	req, err := http.NewRequest("GET", jobURL+"/logs", nil)
+	// Gitea renders job.url from its ROOT_URL, which is the browser-facing address and
+	// need not be reachable from inside the cluster (dev: http://localhost:3000). Keep
+	// only the path and issue the request against the base URL this client was built
+	// with.
+	parsed, err := url.Parse(jobURL)
+	if err != nil {
+		return 0, fmt.Errorf("invalid job url %q: %w", jobURL, err)
+	}
+	req, err := http.NewRequest("GET", c.baseURL+parsed.Path+"/logs", nil)
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
+	// Without this the transport advertises gzip on our behalf; when the reply comes
+	// back compressed it strips Content-Length and reports -1, which the caller cannot
+	// distinguish from "log did not grow".
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -226,6 +243,9 @@ func (c *Client) JobLogSize(jobURL string) (int64, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("job log request failed with status %d", resp.StatusCode)
+	}
+	if resp.ContentLength < 0 {
+		return 0, fmt.Errorf("job log response has unknown length (Content-Encoding %q)", resp.Header.Get("Content-Encoding"))
 	}
 	return resp.ContentLength, nil
 }

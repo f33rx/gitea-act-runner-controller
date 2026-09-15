@@ -6,9 +6,10 @@
 # the script sets up and tears down itself.
 #
 # Aligns with ratified ADR 0006 (org-scoped default): the token carries
-# read+write:organization scope so both the demand listener (read) and the teardown
-# controller (write) can use it against this org. Registration tokens for act_runner
-# come from the org runners endpoint under the same scope.
+# read+write:organization plus read:repository scope so the demand listener (read), the
+# teardown controller (write), and the ADR 0008 stall liveness check (job logs, which are
+# repo-scoped in Gitea) can all use it against this org. Registration tokens for
+# act_runner come from the org runners endpoint under the same scope.
 #
 # Usage:  dev/gitea/seed.sh
 # Env overrides: NS, ADMIN_USER, ADMIN_PASS, ORG, REPO, TOKEN_NAME, LOCAL_PORT
@@ -63,11 +64,11 @@ fi
 # Gitea tokens are user-scoped with named scopes; write:organization + read:organization
 # on an admin who owns the org gives the operator org-level read+write on runners/jobs.
 # Recreate cleanly so the scope set is deterministic (delete-if-exists, then create).
-log "(re)creating access token '${TOKEN_NAME}' with read+write:organization"
+log "(re)creating access token '${TOKEN_NAME}' with read+write:organization, read:repository"
 curl -s "${AUTH[@]}" -X DELETE "${API}/users/${ADMIN_USER}/tokens/${TOKEN_NAME}" >/dev/null 2>&1 || true
 TOKEN=$(curl -sf "${AUTH[@]}" -X POST "${API}/users/${ADMIN_USER}/tokens" \
   -H 'Content-Type: application/json' \
-  -d "{\"name\":\"${TOKEN_NAME}\",\"scopes\":[\"read:organization\",\"write:organization\"]}" \
+  -d "{\"name\":\"${TOKEN_NAME}\",\"scopes\":[\"read:organization\",\"write:organization\",\"read:repository\"]}" \
   | jqget sha1)
 if [ -z "$TOKEN" ]; then log "ERROR: token creation returned no sha1"; exit 1; fi
 umask 077
@@ -165,6 +166,6 @@ cat >&2 <<EOF
 [seed] DONE.
   Gitea:  http://localhost:${LOCAL_PORT}/  (admin: ${ADMIN_USER} / ${ADMIN_PASS})
   Org:    ${ORG}   Repo: ${ORG}/${REPO}   Workflow: ${WF_PATH}
-  Token:  ${TOKEN_FILE}  (read+write:organization; use as the operator credential)
+  Token:  ${TOKEN_FILE}  (read+write:organization, read:repository; use as the operator credential)
   Access: kubectl --context ${CTX} -n ${NS} port-forward svc/${SVC} ${LOCAL_PORT}:3000
 EOF
