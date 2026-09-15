@@ -39,3 +39,7 @@ No GiteaRunnerSet was created by this release (giteaRunnerSet.enabled=false). Ap
 your own GiteaRunnerSet manifest(s) separately -- see config/samples/gitearunnerset.yaml
 for a starting point.
 {{- end }}
+
+Each GiteaRunnerSet's giteaConfigSecretRef must point at a Secret holding a Gitea token
+with read:organization AND read:repository (ADR 0006): the listener polls the org queue
+with the former, and stall detection (ADR 0008) reads job-log sizes with the latter.
