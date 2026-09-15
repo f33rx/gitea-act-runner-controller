@@ -105,6 +105,16 @@ This is the part that is hard in reusable-runner systems and easy here.
      has not yet claimed a job), never a busy one. The `busy` field is the live signal;
      a pod with no started job and an idle row is safe to remove.
   3. busy runners are left alone; they remove themselves on completion.
+
+  *As implemented (amended 2026-09-15):* the controller does not read the Gitea `busy`
+  row on this path. "Idle" is decided in-cluster from the runner's own Pod, because
+  act_runner registers and claims a job faster than the cached `Status.Phase` catches
+  up (garc-x32, garc-nme). A grace period after pod scheduling, and a check of the
+  pod's container statuses, stand in for the busy signal; `scaleDownSafe` holds the
+  exact predicate. Among safe candidates the cheapest to lose is deleted first: no pod,
+  then unscheduled, then scheduled-but-still-pulling. The residual race is the pod
+  informer lagging kubelet's report of container start, roughly a second.
+
 - **No forced mid-job termination path in v1.** If `targetSize` drops below the number
   of busy runners, the busy ones simply outlive the scale-down and self-drain. The
   effective floor of "running pods" is `max(targetSize, busyCount)` until they finish.

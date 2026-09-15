@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -56,6 +58,7 @@ type EphemeralRunnerSetReconciler struct {
 //+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunnersets/finalizers,verbs=update
 //+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunners,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // Reconcile implements reconciliation for EphemeralRunnerSet.
 // It reconciles the actual EphemeralRunner count toward the desired replica count,
@@ -160,38 +163,44 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Gitea-ephemeral analogue of ARC's "decreasing desired replicas never terminates a
 	// running job."
 	//
-	// registrationGracePeriod guards a status-lag race (garc-x32, live-found 2026-07-02):
-	// the act_runner container can start, register with Gitea, and claim a job within a
-	// few seconds -- comfortably faster than this CR's own Status.Phase catching up to
-	// Running via the next Pod-watch reconcile. Without a grace period, a runner that has
-	// ALREADY claimed a task can still read back as phase=="" or Pending here and be
-	// deleted as "idle", stranding the Gitea task at status=running forever (no runner
-	// left to finish it; the orphan sweep only deregisters the runner row, not the task).
-	// A newer runner is therefore never scale-down-eligible regardless of its cached
-	// phase, closing the race without needing a live busy-signal read on this hot path.
-	const registrationGracePeriod = 15 * time.Second
+	// Which runners count as idle is decided by scaleDownSafe (below); see it for the
+	// two status-lag races (garc-x32, garc-nme) it guards against.
 	if currentCount > desiredCount && ers.Spec.PatchID != 0 {
 		toDelete := currentCount - desiredCount
 		deleted := int32(0)
+
+		// Collect every safe candidate first, then delete cheapest-first. The cache List
+		// returns runners in arbitrary order, so deleting as we walk would pick an
+		// essentially random victim -- including a pod mid-image-pull while an
+		// unschedulable sibling survives.
+		type candidate struct {
+			runner *giteaactionsv1alpha1.EphemeralRunner
+			rank   scaleDownRank
+		}
+		var candidates []candidate
 		for i := range ownedRunners.Items {
+			runner := &ownedRunners.Items[i]
+			safe, rank, why := r.scaleDownSafe(ctx, runner)
+			if !safe {
+				if strings.HasPrefix(why, "pod lookup failed") {
+					// Not an ordinary skip: this blocks scale-down for as long as it lasts.
+					log.Error(fmt.Errorf("%s", why), "cannot evaluate runner for scale-down", "runner", runner.Name)
+				} else {
+					log.V(1).Info("skipping scale-down of runner", "runner", runner.Name,
+						"phase", runner.Status.Phase, "reason", why)
+				}
+				continue
+			}
+			candidates = append(candidates, candidate{runner: runner, rank: rank})
+		}
+		sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].rank < candidates[j].rank })
+
+		for _, c := range candidates {
 			if deleted >= toDelete {
 				break
 			}
-			runner := &ownedRunners.Items[i]
-			if age := time.Since(runner.CreationTimestamp.Time); age < registrationGracePeriod {
-				log.V(1).Info("skipping scale-down of newly-created runner (registration grace period)",
-					"runner", runner.Name, "age", age)
-				continue
-			}
-			// Only delete idle (never-claimed) runners: Pending phase, or empty phase
-			// with no assigned RunnerID yet. Never delete a Running/Succeeded runner.
+			runner := c.runner
 			phase := runner.Status.Phase
-			isIdle := phase == "" || phase == giteaactionsv1alpha1.EphemeralRunnerPending
-			if !isIdle {
-				log.V(1).Info("skipping scale-down of non-idle runner (self-drains)",
-					"runner", runner.Name, "phase", phase)
-				continue
-			}
 			if err := r.Delete(ctx, runner); err != nil {
 				if apierrors.IsNotFound(err) {
 					// Already gone (self-drained and GC'd between the List and this Delete);
@@ -232,6 +241,90 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// registrationGracePeriod is how long after a runner is created, and separately how
+// long after its pod is scheduled, scale-down leaves it alone regardless of cached phase.
+const registrationGracePeriod = 15 * time.Second
+
+// scaleDownRank orders safe-to-delete candidates by how close they are to claiming a
+// job, lowest first. Deletion walks candidates in this order so the cheapest loss goes
+// first: a runner with no pod has nothing invested, an unscheduled pod holds no node,
+// and a scheduled pod mid-image-pull has both a node slot and the shortest remaining
+// distance to running act_runner.
+type scaleDownRank int
+
+const (
+	rankNoPod scaleDownRank = iota
+	rankUnscheduled
+	rankScheduledPulling
+)
+
+// scaleDownSafe reports whether an owned runner may be deleted by scale-down, i.e. it
+// has certainly not claimed a job, and how cheap it is to lose. Cached
+// EphemeralRunner phase alone is insufficient because of two status-lag races:
+//
+//   - garc-x32: act_runner starts, registers, and claims within a few seconds of pod
+//     start, faster than the runner's Status.Phase reaches Running. A runner younger
+//     than registrationGracePeriod is therefore never eligible.
+//   - garc-nme: a runner that sat Pending (unschedulable, image pull) longer than that
+//     grace is already past it when the pod finally starts; the claim drops the queue,
+//     desired falls, and the still-Pending cached phase reads as idle while the pod is
+//     already running the job.
+//
+// So the Pod is consulted, and within it the container statuses: a pod stays Pending
+// while any container is still being created, so act_runner can be Running inside a
+// Pending pod. Anything that indicates a started container, a non-Pending phase, or a
+// recent scheduling transition means busy. Absence of a PodScheduled=True condition is
+// treated as unscheduled rather than falling through to safe.
+func (r *EphemeralRunnerSetReconciler) scaleDownSafe(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner) (bool, scaleDownRank, string) {
+	if age := time.Since(runner.CreationTimestamp.Time); age < registrationGracePeriod {
+		return false, 0, "newly created (registration grace period)"
+	}
+	phase := runner.Status.Phase
+	if phase != "" && phase != giteaactionsv1alpha1.EphemeralRunnerPending {
+		return false, 0, "non-idle (self-drains)"
+	}
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: runner.Namespace, Name: runner.Name}, pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, rankNoPod, "no pod yet"
+		}
+		// Caller logs this at Error: a persistent lookup failure blocks all scale-down,
+		// and reporting it only at debug level would hide that entirely.
+		return false, 0, "pod lookup failed: " + err.Error()
+	}
+	if pod.Status.Phase != corev1.PodPending {
+		return false, 0, "pod is " + string(pod.Status.Phase) + " (self-drains)"
+	}
+	// A Pending pod can already be running act_runner: pod phase stays Pending until
+	// every container is created, so a sidecar still pulling holds the phase back while
+	// the runner container works.
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Running != nil || cs.State.Terminated != nil || (cs.Started != nil && *cs.Started) {
+			return false, 0, "pod has a started container (self-drains)"
+		}
+	}
+	scheduledAt, scheduled := podScheduledAt(pod)
+	if !scheduled {
+		return true, rankUnscheduled, "pod unscheduled"
+	}
+	if since := time.Since(scheduledAt); since < registrationGracePeriod {
+		return false, 0, "pod scheduled recently (registration grace period)"
+	}
+	return true, rankScheduledPulling, "pod scheduled but still Pending past grace"
+}
+
+// podScheduledAt reports when the scheduler bound the pod. A pod with no PodScheduled=True
+// condition has not been bound, whatever Spec.NodeName says: the scheduler sets both in
+// the same binding, so trusting only the condition keeps one source of truth.
+func podScheduledAt(pod *corev1.Pod) (time.Time, bool) {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionTrue {
+			return c.LastTransitionTime.Time, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // constructEphemeralRunner constructs a new EphemeralRunner with Gitea config and token.
