@@ -340,8 +340,11 @@ them by **liveness signals**, not a single wall-clock timeout:
   the **teardown/deregister** controller holds a separate **write** credential. There
   are two scoping tiers; **org-scoped is the recommended default** (spike garc-3bk,
   live-confirmed on Gitea 1.26.1):
-  - **Recommended -- org-scoped (zero admin scope):** listener uses **`read:organization`**
-    (`GET /api/v1/orgs/{org}/actions/jobs?status=queued`); teardown uses
+  - **Recommended -- org-scoped (zero admin scope):** the runner set's read credential
+    uses **`read:organization`** (listener queue read,
+    `GET /api/v1/orgs/{org}/actions/jobs?status=queued`) plus **`read:repository`**
+    (stall liveness reads the job-log byte length, a repo-scoped endpoint; ADR 0006
+    amendment 2026-09-15); teardown uses
     **`write:organization`** (`DELETE /api/v1/orgs/{org}/actions/runners/{id}` returns
     204 -- no `write:admin`). Registration tokens come from the org
     `registration-token` endpoint under the same scope.
