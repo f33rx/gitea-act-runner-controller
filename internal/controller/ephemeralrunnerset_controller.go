@@ -56,6 +56,7 @@ type EphemeralRunnerSetReconciler struct {
 //+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunnersets/finalizers,verbs=update
 //+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunners,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // Reconcile implements reconciliation for EphemeralRunnerSet.
 // It reconciles the actual EphemeralRunner count toward the desired replica count,
@@ -160,16 +161,8 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Gitea-ephemeral analogue of ARC's "decreasing desired replicas never terminates a
 	// running job."
 	//
-	// registrationGracePeriod guards a status-lag race (garc-x32, live-found 2026-07-02):
-	// the act_runner container can start, register with Gitea, and claim a job within a
-	// few seconds -- comfortably faster than this CR's own Status.Phase catching up to
-	// Running via the next Pod-watch reconcile. Without a grace period, a runner that has
-	// ALREADY claimed a task can still read back as phase=="" or Pending here and be
-	// deleted as "idle", stranding the Gitea task at status=running forever (no runner
-	// left to finish it; the orphan sweep only deregisters the runner row, not the task).
-	// A newer runner is therefore never scale-down-eligible regardless of its cached
-	// phase, closing the race without needing a live busy-signal read on this hot path.
-	const registrationGracePeriod = 15 * time.Second
+	// Which runners count as idle is decided by scaleDownSafe (below); see it for the
+	// two status-lag races (garc-x32, garc-nme) it guards against.
 	if currentCount > desiredCount && ers.Spec.PatchID != 0 {
 		toDelete := currentCount - desiredCount
 		deleted := int32(0)
@@ -178,18 +171,9 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 				break
 			}
 			runner := &ownedRunners.Items[i]
-			if age := time.Since(runner.CreationTimestamp.Time); age < registrationGracePeriod {
-				log.V(1).Info("skipping scale-down of newly-created runner (registration grace period)",
-					"runner", runner.Name, "age", age)
-				continue
-			}
-			// Only delete idle (never-claimed) runners: Pending phase, or empty phase
-			// with no assigned RunnerID yet. Never delete a Running/Succeeded runner.
 			phase := runner.Status.Phase
-			isIdle := phase == "" || phase == giteaactionsv1alpha1.EphemeralRunnerPending
-			if !isIdle {
-				log.V(1).Info("skipping scale-down of non-idle runner (self-drains)",
-					"runner", runner.Name, "phase", phase)
+			if safe, why := r.scaleDownSafe(ctx, runner); !safe {
+				log.V(1).Info("skipping scale-down of runner", "runner", runner.Name, "phase", phase, "reason", why)
 				continue
 			}
 			if err := r.Delete(ctx, runner); err != nil {
@@ -232,6 +216,58 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// registrationGracePeriod is how long after a runner is created, and separately how
+// long after its pod is scheduled, scale-down leaves it alone regardless of cached phase.
+const registrationGracePeriod = 15 * time.Second
+
+// scaleDownSafe reports whether an owned runner may be deleted by scale-down, i.e. it
+// has certainly not claimed a job. Two status-lag races make the cached
+// EphemeralRunner phase alone insufficient:
+//
+//   - garc-x32 (2026-07-02): act_runner starts, registers, and claims within a few
+//     seconds of pod start, faster than the runner's Status.Phase reaches Running. A
+//     runner younger than registrationGracePeriod is therefore never eligible.
+//   - garc-nme (2026-09-15): a runner that sat Pending (unschedulable, image pull)
+//     longer than that grace is already past it when the pod finally starts; the claim
+//     drops the queue, desired falls, and the still-Pending cached phase reads as idle
+//     while the pod is already running the job. So the Pod itself is consulted: a pod
+//     that is no longer Pending, or that was scheduled within the grace period, is
+//     treated as busy. Only a pod that has not been scheduled yet, or has sat scheduled-
+//     but-Pending (pulling) past the grace, is safe: act_runner has not started.
+//
+// The residual window is informer lag on the Pending->Running pod transition, which is
+// milliseconds against the seconds act_runner needs to register and claim.
+func (r *EphemeralRunnerSetReconciler) scaleDownSafe(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner) (bool, string) {
+	if age := time.Since(runner.CreationTimestamp.Time); age < registrationGracePeriod {
+		return false, "newly created (registration grace period)"
+	}
+	phase := runner.Status.Phase
+	if phase != "" && phase != giteaactionsv1alpha1.EphemeralRunnerPending {
+		return false, "non-idle (self-drains)"
+	}
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: runner.Namespace, Name: runner.Name}, pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, "no pod yet"
+		}
+		return false, "pod lookup failed: " + err.Error()
+	}
+	if pod.Status.Phase != corev1.PodPending {
+		return false, "pod is " + string(pod.Status.Phase) + " (self-drains)"
+	}
+	if pod.Spec.NodeName == "" {
+		return true, "pod unscheduled"
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionTrue {
+			if since := time.Since(c.LastTransitionTime.Time); since < registrationGracePeriod {
+				return false, "pod scheduled recently (registration grace period)"
+			}
+		}
+	}
+	return true, "pod scheduled but still Pending past grace"
 }
 
 // constructEphemeralRunner constructs a new EphemeralRunner with Gitea config and token.
