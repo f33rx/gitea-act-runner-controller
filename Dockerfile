@@ -1,4 +1,9 @@
-FROM golang:1.24.13 as builder
+FROM --platform=$BUILDPLATFORM golang:1.24.13 AS builder
+
+# Set by buildx per target platform. Declared here so the build is cross-compiled
+# from a single native builder rather than emulated, which is far faster.
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /workspace
 
@@ -12,8 +17,10 @@ COPY api/ api/
 COPY internal/ internal/
 COPY hack/ hack/
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -ldflags="-w -s" -o manager ./cmd/manager
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -ldflags="-w -s" -o listener ./cmd/listener
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -a -ldflags="-w -s" -o manager ./cmd/manager
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -a -ldflags="-w -s" -o listener ./cmd/listener
 
 FROM gcr.io/distroless/base-debian12:nonroot
 

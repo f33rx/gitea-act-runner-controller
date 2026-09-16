@@ -1,0 +1,155 @@
+name: Release
+
+# Cut a tag and publish a multi-arch image to GHCR once the gates have passed on main.
+#
+# Triggered by the E2E workflow completing, rather than by the push itself: branch
+# protection already requires CI and E2E on every PR, and workflow_run fires only after
+# a real success on main, so the release can never outrun its own gates. The guard below
+# additionally re-checks the CI workflow's conclusion for the same commit, because
+# workflow_run tells us about E2E only.
+on:
+  workflow_run:
+    workflows: ["E2E"]
+    branches: [main]
+    types: [completed]
+  # Manual escape hatch: re-cut a release if a run was lost, or bootstrap the first tag.
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    # Only on a green E2E run (or an explicit dispatch), never on a failed or cancelled one.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the tag and create the Release
+      packages: write   # push to GHCR
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the version calculation walks commits since the last tag.
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      # workflow_run only reports the E2E workflow. Require CI to have succeeded for the
+      # same commit too, so a release cannot ship on a commit whose unit gates failed.
+      - name: Require CI green for this commit
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          conclusion="$(gh run list --workflow CI --commit "$SHA" \
+            --json conclusion --jq '.[0].conclusion // "missing"')"
+          echo "CI conclusion for ${SHA}: ${conclusion}"
+          [ "$conclusion" = "success" ] || {
+            echo "::error::CI did not succeed for this commit; refusing to release."
+            exit 1
+          }
+
+      # Docs-only merges must not cut a release. Compare against the previous tag so a
+      # run that is skipped here is picked up by the next release-worthy merge.
+      - name: Decide whether this commit is release-worthy
+        id: relevant
+        run: |
+          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -z "$last_tag" ]; then
+            echo "No prior tag: first release is always warranted."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Go sources, module files, the build, and the chart. Docs, ADRs, samples and
+          # dev tooling deliberately excluded.
+          if git diff --name-only "${last_tag}..HEAD" \
+             | grep -qE '^(.*\.go|go\.mod|go\.sum|Dockerfile|charts/.*|config/crd/.*)$'; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Only non-shipping files changed since ${last_tag}; skipping release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Conventional commits drive the bump: a breaking marker majors, feat: minors,
+      # anything else patches. Mirrors the reference workflow's logic.
+      - name: Compute next version
+        id: version
+        if: steps.relevant.outputs.release == 'true'
+        run: |
+          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -z "$last_tag" ]; then
+            tag="v0.1.0"
+          else
+            range="${last_tag}..HEAD"
+            subjects="$(git log --format='%s%n%b' "$range")"
+            major="${last_tag#v}"; minor="${major#*.}"; patch="${minor#*.}"
+            major="${major%%.*}"; minor="${minor%%.*}"
+            if echo "$subjects" | grep -qE '^BREAKING CHANGE|^[a-z]+(\(.+\))?!:'; then
+              major=$((major + 1)); minor=0; patch=0
+            elif echo "$subjects" | grep -qE '^feat(\(.+\))?:'; then
+              minor=$((minor + 1)); patch=0
+            else
+              patch=$((patch + 1))
+            fi
+            tag="v${major}.${minor}.${patch}"
+          fi
+          echo "Next version: ${tag} (previous: ${last_tag:-none})"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        if: steps.relevant.outputs.release == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        if: steps.relevant.outputs.release == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.relevant.outputs.release == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The Dockerfile cross-compiles via TARGETOS/TARGETARCH, so both architectures
+      # build on the native runner rather than under emulation.
+      - name: Build and push image
+        if: steps.relevant.outputs.release == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Tag only after the image is published: a tag with no image behind it is worse
+      # than no tag, and this ordering makes the whole step re-runnable on failure.
+      - name: Tag and release
+        if: steps.relevant.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git tag "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --notes "Container image: \`${REGISTRY}/${IMAGE_NAME}:${TAG}\` (linux/amd64, linux/arm64)"
