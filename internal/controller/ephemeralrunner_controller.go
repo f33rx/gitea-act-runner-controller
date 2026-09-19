@@ -409,35 +409,13 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 		return ctrl.Result{}, nil
 	}
 
-	// Step 1: Deregister the runner from Gitea (org-scoped DELETE /orgs/{org}/actions/runners/{id}).
-	// This is the PRIMARY teardown path. Status.RunnerID is never populated, so the
-	// registration is normally resolved by name: act_runner registers under the CR name
-	// (constructPod pins GITEA_RUNNER_NAME). Doing this here rather than leaving it to
-	// the sweep matters once the GiteaRunnerSet is gone (garc-6dx): the sweep discovers
-	// orgs from GiteaRunnerSets, so nothing else would ever reclaim the registration.
+	// Step 1: Deregister the runner from Gitea. This is the PRIMARY teardown path, and
+	// the finalizer must do it rather than leave it to the sweep: once the
+	// GiteaRunnerSet is gone (garc-6dx) the sweep has no org to discover.
 	if runner.Status.RunnerID > 0 || runner.Spec.OrgName != "" {
-		token, err := readTeardownToken(ctx, r, r.TeardownCredential)
-		if err != nil {
-			// Without the credential nothing can be deregistered. Requeue to retry.
-			log.Error(err, "finalizer: cannot deregister")
+		if err := r.deregisterFromGitea(ctx, runner); err != nil {
+			log.Error(err, "finalizer: deregistration failed, will retry", "runner", runner.Name)
 			return ctrl.Result{Requeue: true}, err
-		}
-
-		client := gitea.NewClient(runner.Spec.GiteaConfigURL, token)
-		ids, err := r.registrationsToDeregister(ctx, client, runner)
-		if err != nil {
-			log.Error(err, "failed to resolve runner registration by name", "runner", runner.Name)
-			return ctrl.Result{Requeue: true}, err
-		}
-
-		for _, id := range ids {
-			log.Info("finalizer: deregistering runner from Gitea", "runner", runner.Name, "runnerId", id)
-			if err := client.DeregisterOrgRunner(ctx, runner.Spec.OrgName, id); err != nil {
-				log.Error(err, "deregister failed", "runnerId", id)
-				// Requeue on transient errors (network, etc).
-				return ctrl.Result{Requeue: true}, err
-			}
-			log.Info("successfully deregistered runner from Gitea", "runnerId", id)
 		}
 	}
 
@@ -455,10 +433,39 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 	return ctrl.Result{}, nil
 }
 
-// registrationsToDeregister returns the Gitea runner IDs the finalizer must delete: the
-// recorded RunnerID when there is one, otherwise every ephemeral registration in the org
-// carrying this runner's name. Names are reused across generations, so a stale
-// registration from an earlier generation is reclaimed along with the current one.
+// deregisterFromGitea removes every Gitea registration belonging to the runner using
+// the org-write teardown credential. Any error means at least one registration may
+// remain and the caller must retry; deregistration is idempotent, so a retry after a
+// partial success is safe.
+func (r *EphemeralRunnerReconciler) deregisterFromGitea(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner) error {
+	log := log.FromContext(ctx)
+
+	token, err := readTeardownToken(ctx, r, r.TeardownCredential)
+	if err != nil {
+		return err
+	}
+	client := gitea.NewClient(runner.Spec.GiteaConfigURL, token)
+
+	ids, err := r.registrationsToDeregister(ctx, client, runner)
+	if err != nil {
+		return fmt.Errorf("resolve registration for %s: %w", runner.Name, err)
+	}
+	for _, id := range ids {
+		if err := client.DeregisterOrgRunner(ctx, runner.Spec.OrgName, id); err != nil {
+			return err
+		}
+		log.Info("deregistered runner from Gitea", "runner", runner.Name, "runnerId", id)
+	}
+	return nil
+}
+
+// registrationsToDeregister returns the Gitea runner IDs to delete: the recorded
+// RunnerID when there is one, otherwise every ephemeral registration in the org
+// carrying this runner's name. Status.RunnerID is never populated today (act_runner
+// registers under the CR name, which constructPod pins via GITEA_RUNNER_NAME, and
+// nothing reports the ID back), so the by-name path is the one that runs. Names are
+// reused across generations, so a stale registration from an earlier generation is
+// reclaimed along with the current one.
 func (r *EphemeralRunnerReconciler) registrationsToDeregister(ctx context.Context, client *gitea.Client, runner *giteaactionsv1alpha1.EphemeralRunner) ([]int64, error) {
 	if runner.Status.RunnerID > 0 {
 		return []int64{runner.Status.RunnerID}, nil
