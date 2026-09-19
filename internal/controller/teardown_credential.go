@@ -37,7 +37,7 @@ func teardownCredentialOrDefault(key types.NamespacedName) types.NamespacedName 
 
 // readTeardownToken returns the org-write token from the Secret at key (defaults
 // applied). A missing Secret or an empty token is an error: without it nothing can be
-// deregistered, and callers requeue rather than proceed.
+// deregistered.
 func readTeardownToken(ctx context.Context, c client.Reader, key types.NamespacedName) (string, error) {
 	key = teardownCredentialOrDefault(key)
 	secret := &corev1.Secret{}

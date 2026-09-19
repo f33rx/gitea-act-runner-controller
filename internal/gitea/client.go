@@ -41,10 +41,14 @@ func NewClient(baseURL, token string) *Client {
 	}
 }
 
-// DeregisterOrgRunner deletes a runner registration from an organization. A runner
-// that is already gone (404) counts as success: every caller wants "not registered"
-// as the end state, and treating the absent case as an error would just force each of
-// them to special-case it. Any other non-204 response is an error carrying the status.
+// DeregisterOrgRunner deletes a runner registration from an organization. 204 and 404
+// both return nil: every caller wants "not registered" as the end state. Gitea answers
+// 404 not only for an absent runner but also for an unknown org and for a runner that
+// exists but belongs to another org or a repo (ADR 0006 hit that last case live), so
+// callers must only pass IDs obtained from ListOrgRunners on the same org and token;
+// any other ID can be reported as deregistered while the row remains. A token without
+// org-owner rights is 403 and surfaces as an error, as does any other non-204 status,
+// with Gitea's response body carried in the error.
 func (c *Client) DeregisterOrgRunner(ctx context.Context, org string, runnerID int64) error {
 	url := fmt.Sprintf("%s/api/v1/orgs/%s/actions/runners/%d", c.baseURL, org, runnerID)
 
@@ -62,14 +66,15 @@ func (c *Client) DeregisterOrgRunner(ctx context.Context, org string, runnerID i
 	}
 	defer resp.Body.Close()
 
-	// Drain the response body to allow connection reuse
-	_, _ = io.ReadAll(resp.Body)
+	// Read the body: it drains the connection for reuse and, on an unexpected status,
+	// carries Gitea's reason (e.g. which scope the token lacks).
+	body, _ := io.ReadAll(resp.Body)
 
 	switch resp.StatusCode {
 	case http.StatusNoContent, http.StatusNotFound:
 		return nil
 	default:
-		return fmt.Errorf("deregister runner %d in org %s: unexpected status %d", runnerID, org, resp.StatusCode)
+		return fmt.Errorf("deregister runner %d in org %s failed with status %d: %s", runnerID, org, resp.StatusCode, string(body))
 	}
 }
 

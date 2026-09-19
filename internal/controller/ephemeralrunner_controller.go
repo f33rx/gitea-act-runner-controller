@@ -465,7 +465,9 @@ func (r *EphemeralRunnerReconciler) deregisterFromGitea(ctx context.Context, run
 // registers under the CR name, which constructPod pins via GITEA_RUNNER_NAME, and
 // nothing reports the ID back), so the by-name path is the one that runs. Names are
 // reused across generations, so a stale registration from an earlier generation is
-// reclaimed along with the current one.
+// reclaimed along with the current one. If Status.RunnerID is ever populated it must
+// come from this org's runner list: Gitea answers 404 for an ID from any other scope
+// and DeregisterOrgRunner treats that as already gone.
 func (r *EphemeralRunnerReconciler) registrationsToDeregister(ctx context.Context, client *gitea.Client, runner *giteaactionsv1alpha1.EphemeralRunner) ([]int64, error) {
 	if runner.Status.RunnerID > 0 {
 		return []int64{runner.Status.RunnerID}, nil
