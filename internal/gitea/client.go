@@ -41,14 +41,16 @@ func NewClient(baseURL, token string) *Client {
 	}
 }
 
-// DeregisterOrgRunner deletes an ephemeral runner from an organization.
-// Returns the HTTP status code. 204 indicates success.
-func (c *Client) DeregisterOrgRunner(ctx context.Context, org string, runnerID int64) (int, error) {
+// DeregisterOrgRunner deletes a runner registration from an organization. A runner
+// that is already gone (404) counts as success: every caller wants "not registered"
+// as the end state, and treating the absent case as an error would just force each of
+// them to special-case it. Any other non-204 response is an error carrying the status.
+func (c *Client) DeregisterOrgRunner(ctx context.Context, org string, runnerID int64) error {
 	url := fmt.Sprintf("%s/api/v1/orgs/%s/actions/runners/%d", c.baseURL, org, runnerID)
 
 	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
 	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
@@ -56,14 +58,19 @@ func (c *Client) DeregisterOrgRunner(ctx context.Context, org string, runnerID i
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer resp.Body.Close()
 
 	// Drain the response body to allow connection reuse
 	_, _ = io.ReadAll(resp.Body)
 
-	return resp.StatusCode, nil
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusNotFound:
+		return nil
+	default:
+		return fmt.Errorf("deregister runner %d in org %s: unexpected status %d", runnerID, org, resp.StatusCode)
+	}
 }
 
 // ListOrgRunners fetches the list of runners in an organization.

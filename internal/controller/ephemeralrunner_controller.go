@@ -461,19 +461,12 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 
 		for _, id := range ids {
 			log.Info("finalizer: deregistering runner from Gitea", "runner", runner.Name, "runnerId", id)
-			statusCode, err := client.DeregisterOrgRunner(ctx, runner.Spec.OrgName, id)
-			if err != nil {
-				log.Error(err, "deregister API call failed", "runnerId", id)
+			if err := client.DeregisterOrgRunner(ctx, runner.Spec.OrgName, id); err != nil {
+				log.Error(err, "deregister failed", "runnerId", id)
 				// Requeue on transient errors (network, etc).
 				return ctrl.Result{Requeue: true}, err
 			}
-			// 404 means the runner is already gone (cleanup already happened). Anything
-			// else that is not 204 should requeue to retry.
-			if statusCode != 204 && statusCode != 404 {
-				log.Error(fmt.Errorf("unexpected status code"), "deregister returned non-204", "runnerId", id, "statusCode", statusCode)
-				return ctrl.Result{Requeue: true}, fmt.Errorf("deregister returned status %d", statusCode)
-			}
-			log.Info("successfully deregistered runner from Gitea", "runnerId", id, "statusCode", statusCode)
+			log.Info("successfully deregistered runner from Gitea", "runnerId", id)
 		}
 	}
 
