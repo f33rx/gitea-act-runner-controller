@@ -119,6 +119,7 @@ func main() {
 	if err = (&controller.EphemeralRunnerSetReconciler{
 		Client:                       mgr.GetClient(),
 		Scheme:                       mgr.GetScheme(),
+		APIReader:                    mgr.GetAPIReader(),
 		DefaultActiveDeadlineSeconds: defaultActiveDeadlineSeconds,
 		DefaultStallWindow:           defaultStallWindow,
 		DefaultPendingTimeout:        defaultPendingTimeout,

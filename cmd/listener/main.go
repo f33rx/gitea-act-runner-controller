@@ -188,6 +188,7 @@ func (l *Listener) syncDemand(ctx context.Context) error {
 						PatchID:  patchIDInt,
 					},
 				}
+				ensureOwnedBy(ers, &rs)
 				if err := l.client.Create(ctx, ers); err != nil {
 					log.Error(err, "failed to create EphemeralRunnerSet", "name", rs.Name)
 					continue
@@ -198,8 +199,10 @@ func (l *Listener) syncDemand(ctx context.Context) error {
 				continue
 			}
 		} else {
-			// Update the EphemeralRunnerSet replicas and patchID if needed.
-			if ers.Spec.Replicas != desiredCount || ers.Spec.PatchID == 0 {
+			// Update the EphemeralRunnerSet replicas and patchID if needed. Sets created
+			// before the owner reference existed pick it up here.
+			ownerAdded := ensureOwnedBy(ers, &rs)
+			if ers.Spec.Replicas != desiredCount || ers.Spec.PatchID == 0 || ownerAdded {
 				ers.Spec.Replicas = desiredCount
 				ers.Spec.PatchID = patchIDInt
 				if err := l.client.Update(ctx, ers); err != nil {
@@ -219,6 +222,29 @@ func (l *Listener) syncDemand(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// ensureOwnedBy makes the GiteaRunnerSet the EphemeralRunnerSet's controller owner so
+// that deleting the set cascades through GC instead of leaving the EphemeralRunnerSet
+// (and its runners) reconciling forever (garc-6dx). BlockOwnerDeletion is deliberately
+// unset: it is only needed for foreground deletion, and setting it requires update on
+// gitearunnersets/finalizers under the OwnerReferencesPermissionEnforcement admission
+// plugin, a grant the listener does not have. Returns true when a reference was added.
+func ensureOwnedBy(ers *giteaactionsv1alpha1.EphemeralRunnerSet, rs *giteaactionsv1alpha1.GiteaRunnerSet) bool {
+	for _, ref := range ers.OwnerReferences {
+		if ref.UID == rs.UID {
+			return false
+		}
+	}
+	isController := true
+	ers.OwnerReferences = append(ers.OwnerReferences, metav1.OwnerReference{
+		APIVersion: giteaactionsv1alpha1.GroupVersion.String(),
+		Kind:       "GiteaRunnerSet",
+		Name:       rs.Name,
+		UID:        rs.UID,
+		Controller: &isController,
+	})
+	return true
 }
 
 // countMatchingJobs counts how many jobs this runner set can serve.

@@ -392,10 +392,12 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 	}
 
 	// Step 1: Deregister the runner from Gitea (org-scoped DELETE /orgs/{org}/actions/runners/{id}).
-	// This is the PRIMARY teardown path (not crash-only as was assumed before).
-	if runner.Status.RunnerID > 0 {
-		log.Info("finalizer: deregistering runner from Gitea", "runner", runner.Name, "runnerId", runner.Status.RunnerID)
-
+	// This is the PRIMARY teardown path. Status.RunnerID is never populated, so the
+	// registration is normally resolved by name: act_runner registers under the CR name
+	// (constructPod pins GITEA_RUNNER_NAME). Doing this here rather than leaving it to
+	// the sweep matters once the GiteaRunnerSet is gone (garc-6dx): the sweep discovers
+	// orgs from GiteaRunnerSets, so nothing else would ever reclaim the registration.
+	if runner.Status.RunnerID > 0 || runner.Spec.OrgName != "" {
 		// Read the teardown credential Secret.
 		teardownSecretName := types.NamespacedName{
 			Namespace: "gitea-actions-controller",
@@ -414,25 +416,29 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 			return ctrl.Result{Requeue: true}, fmt.Errorf("empty token in teardown Secret")
 		}
 
-		// Deregister from Gitea.
 		client := gitea.NewClient(runner.Spec.GiteaConfigURL, token)
-		statusCode, err := client.DeregisterOrgRunner(runner.Spec.OrgName, runner.Status.RunnerID)
+		ids, err := r.registrationsToDeregister(client, runner)
 		if err != nil {
-			log.Error(err, "deregister API call failed")
-			// Requeue on transient errors (network, etc).
+			log.Error(err, "failed to resolve runner registration by name", "runner", runner.Name)
 			return ctrl.Result{Requeue: true}, err
 		}
 
-		if statusCode != 204 {
-			log.Error(fmt.Errorf("unexpected status code"), "deregister returned non-204", "statusCode", statusCode)
-			// 404 means the runner is already gone (cleanup already happened). Allow finalizer to proceed.
-			// Other errors should requeue to retry.
-			if statusCode != 404 {
+		for _, id := range ids {
+			log.Info("finalizer: deregistering runner from Gitea", "runner", runner.Name, "runnerId", id)
+			statusCode, err := client.DeregisterOrgRunner(runner.Spec.OrgName, id)
+			if err != nil {
+				log.Error(err, "deregister API call failed", "runnerId", id)
+				// Requeue on transient errors (network, etc).
+				return ctrl.Result{Requeue: true}, err
+			}
+			// 404 means the runner is already gone (cleanup already happened). Anything
+			// else that is not 204 should requeue to retry.
+			if statusCode != 204 && statusCode != 404 {
+				log.Error(fmt.Errorf("unexpected status code"), "deregister returned non-204", "runnerId", id, "statusCode", statusCode)
 				return ctrl.Result{Requeue: true}, fmt.Errorf("deregister returned status %d", statusCode)
 			}
+			log.Info("successfully deregistered runner from Gitea", "runnerId", id, "statusCode", statusCode)
 		}
-
-		log.Info("successfully deregistered runner from Gitea", "statusCode", statusCode)
 	}
 
 	// Step 2: The Pod and per-pod Secret are owner-ref'd to this CR, so Kubernetes GC will handle deletion.
@@ -447,6 +453,27 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 
 	log.Info("finalizer complete, runner CR will be garbage collected", "runner", runner.Name)
 	return ctrl.Result{}, nil
+}
+
+// registrationsToDeregister returns the Gitea runner IDs the finalizer must delete: the
+// recorded RunnerID when there is one, otherwise every ephemeral registration in the org
+// carrying this runner's name. Names are reused across generations, so a stale
+// registration from an earlier generation is reclaimed along with the current one.
+func (r *EphemeralRunnerReconciler) registrationsToDeregister(client *gitea.Client, runner *giteaactionsv1alpha1.EphemeralRunner) ([]int64, error) {
+	if runner.Status.RunnerID > 0 {
+		return []int64{runner.Status.RunnerID}, nil
+	}
+	runners, err := client.ListOrgRunners(runner.Spec.OrgName)
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	for _, rr := range runners {
+		if rr.Ephemeral && rr.Name == runner.Name {
+			ids = append(ids, rr.ID)
+		}
+	}
+	return ids, nil
 }
 
 // constructTokenSecret creates a Secret containing the registration token.
