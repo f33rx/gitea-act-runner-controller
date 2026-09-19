@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -34,6 +35,7 @@ import (
 	giteaactionsv1alpha1 "github.com/f33rx/gitea-act-runner-controller/api/v1alpha1"
 	"github.com/f33rx/gitea-act-runner-controller/internal/controller"
 	"github.com/f33rx/gitea-act-runner-controller/internal/metrics"
+	"github.com/f33rx/gitea-act-runner-controller/internal/watchns"
 )
 
 var (
@@ -54,6 +56,19 @@ func main() {
 	var defaultActiveDeadlineSeconds int64
 	var defaultStallWindow time.Duration
 	var defaultPendingTimeout time.Duration
+	var watchNamespaces string
+	var teardownCredentialNamespace, teardownCredentialName string
+	var runnerServiceAccount string
+	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
+		"Comma-separated namespaces to cache and reconcile in. Required when the manager runs "+
+			"under namespace-scoped RBAC (a Role per namespace); the default cluster-wide cache "+
+			"issues LIST/WATCH a Role cannot authorize. Empty = all namespaces.")
+	flag.StringVar(&teardownCredentialNamespace, "teardown-credential-namespace", controller.DefaultTeardownSecretNamespace,
+		"Namespace of the Secret holding the org-write Gitea token used to deregister runners (ADR 0006).")
+	flag.StringVar(&teardownCredentialName, "teardown-credential-name", controller.DefaultTeardownSecretName,
+		"Name of the Secret holding the org-write Gitea token used to deregister runners (ADR 0006).")
+	flag.StringVar(&runnerServiceAccount, "runner-service-account", controller.DefaultRunnerServiceAccountName,
+		"ServiceAccount name set on every runner Pod. Must exist in each namespace that holds a GiteaRunnerSet.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -86,8 +101,15 @@ func main() {
 	// default registry, the same one the metrics server below already serves.
 	metrics.Register(crmetrics.Registry)
 
+	namespaces := watchns.Parse(watchNamespaces)
+	if len(namespaces) > 0 {
+		setupLog.Info("restricting cache to namespaces", "namespaces", namespaces)
+	}
+	teardownCredential := types.NamespacedName{Namespace: teardownCredentialNamespace, Name: teardownCredentialName}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
+		Cache:  watchns.CacheOptions(namespaces),
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
 		},
@@ -101,16 +123,19 @@ func main() {
 	}
 
 	if err = (&controller.EphemeralRunnerReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:                   mgr.GetClient(),
+		Scheme:                   mgr.GetScheme(),
+		TeardownCredential:       teardownCredential,
+		RunnerServiceAccountName: runnerServiceAccount,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EphemeralRunner")
 		os.Exit(1)
 	}
 
 	if err = (&controller.SweepReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		TeardownCredential: teardownCredential,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sweep")
 		os.Exit(1)

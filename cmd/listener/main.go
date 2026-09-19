@@ -33,6 +33,7 @@ import (
 
 	giteaactionsv1alpha1 "github.com/f33rx/gitea-act-runner-controller/api/v1alpha1"
 	"github.com/f33rx/gitea-act-runner-controller/internal/gitea"
+	"github.com/f33rx/gitea-act-runner-controller/internal/watchns"
 )
 
 var (
@@ -48,7 +49,12 @@ func init() {
 
 func main() {
 	var pollInterval time.Duration
+	var watchNamespaces string
 	flag.DurationVar(&pollInterval, "poll-interval", 10*time.Second, "Interval to poll Gitea for queued jobs")
+	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
+		"Comma-separated namespaces to cache GiteaRunnerSets/EphemeralRunnerSets/Secrets in. Required "+
+			"under namespace-scoped RBAC; the default cluster-wide cache cannot sync with only a Role. "+
+			"Empty = all namespaces.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -57,9 +63,15 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	namespaces := watchns.Parse(watchNamespaces)
+	if len(namespaces) > 0 {
+		setupLog.Info("restricting cache to namespaces", "namespaces", namespaces)
+	}
+
 	// Create a minimal manager to get a working client.
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
+		Cache:  watchns.CacheOptions(namespaces),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create manager")

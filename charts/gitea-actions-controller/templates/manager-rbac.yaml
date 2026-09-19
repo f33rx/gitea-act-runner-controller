@@ -28,8 +28,7 @@ subjects:
     name: {{ .Release.Name }}-manager
     namespace: {{ .Release.Namespace }}
 {{- else }}
-{{- range .Values.rbac.watchNamespaces }}
-{{- $ns := tpl . $ }}
+{{- range $ns := splitList "," (include "gitea-actions-controller.watchNamespaces" .) }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

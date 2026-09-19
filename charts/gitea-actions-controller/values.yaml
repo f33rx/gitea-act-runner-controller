@@ -20,11 +20,14 @@ rbac:
   # Role/RoleBinding per entry in watchNamespaces.
   clusterScope: false
   # watchNamespaces lists the namespaces the operator manages GiteaRunnerSets/pods/
-  # secrets in, when rbac.clusterScope is false. Defaults to the release namespace
-  # only. Remember to add new managed namespaces here and `helm upgrade` -- they are
-  # not picked up automatically the way a ClusterRole would.
-  watchNamespaces:
-    - "{{ .Release.Namespace }}"
+  # secrets in, when rbac.clusterScope is false. The release namespace is always
+  # included (the teardown credential Secret and leader-election Lease live there), so
+  # the default is effectively "release namespace only". Each entry gets a Role/
+  # RoleBinding, a runner ServiceAccount (runner.serviceAccount), and is passed to the
+  # binaries as --watch-namespaces so the informer cache matches the grants. Remember
+  # to add new managed namespaces here and `helm upgrade` -- they are not picked up
+  # automatically the way a ClusterRole would.
+  watchNamespaces: []
 
 manager:
   replicaCount: 1
@@ -73,13 +76,27 @@ securityContext:
     seccompProfile:
       type: RuntimeDefault
 
+# runner configures what the manager stamps onto every runner Pod it creates.
+runner:
+  # serviceAccount is set on each runner Pod, so it must exist in every namespace that
+  # holds a GiteaRunnerSet or the Pod is rejected at admission. With create=true the
+  # chart creates it (token automount off; act_runner never calls the Kubernetes API)
+  # in the release namespace and each rbac.watchNamespaces entry. Under
+  # rbac.clusterScope you must create it yourself in any other namespace you put a
+  # GiteaRunnerSet in.
+  serviceAccount:
+    create: true
+    name: gitea-runner
+
 # teardownCredential configures the Gitea org-write credential used by the manager's
 # finalizer/sweep to deregister runners (ADR 0006). Leave create=false and pre-create
 # the Secret yourself (recommended for anything beyond local dev) to avoid the token
 # passing through `helm install`/`--set` shell history and release history/state.
+# The Secret is always looked up in the release namespace; the manager is told the
+# reference via --teardown-credential-namespace/--teardown-credential-name.
 teardownCredential:
   create: false
-  # secretName is the existing Secret to use when create is false.
+  # secretName is the Secret to use (pre-existing when create is false).
   secretName: gitea-teardown-credential
   # token is ONLY used when create is true (local/dev convenience). Never commit a
   # real token into a values file.

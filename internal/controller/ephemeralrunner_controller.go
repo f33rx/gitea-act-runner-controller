@@ -58,10 +58,49 @@ const (
 	envGiteaRunnerOrgName  = "GITEA_RUNNER_ORG_NAME"
 )
 
+// Defaults for the deployment-specific names the manager is told about via flags.
+// They match config/manager and the e2e harness so a bare binary keeps working.
+// #nosec G101 -- Kubernetes object names, not credential material.
+const (
+	DefaultTeardownSecretNamespace  = "gitea-actions-controller"
+	DefaultTeardownSecretName       = "gitea-teardown-credential"
+	DefaultRunnerServiceAccountName = "gitea-runner"
+)
+
 // EphemeralRunnerReconciler reconciles an EphemeralRunner object.
 type EphemeralRunnerReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// TeardownCredential locates the org-write Secret the finalizer uses to
+	// deregister runners. Zero value falls back to the Default* constants.
+	TeardownCredential types.NamespacedName
+	// RunnerServiceAccountName is set on every runner Pod. Empty falls back to
+	// DefaultRunnerServiceAccountName.
+	RunnerServiceAccountName string
+}
+
+func (r *EphemeralRunnerReconciler) teardownCredentialKey() types.NamespacedName {
+	return teardownCredentialOrDefault(r.TeardownCredential)
+}
+
+func (r *EphemeralRunnerReconciler) runnerServiceAccountName() string {
+	if r.RunnerServiceAccountName != "" {
+		return r.RunnerServiceAccountName
+	}
+	return DefaultRunnerServiceAccountName
+}
+
+// teardownCredentialOrDefault fills either half of an unset reference so a partially
+// configured reconciler still resolves to a usable key.
+func teardownCredentialOrDefault(key types.NamespacedName) types.NamespacedName {
+	if key.Namespace == "" {
+		key.Namespace = DefaultTeardownSecretNamespace
+	}
+	if key.Name == "" {
+		key.Name = DefaultTeardownSecretName
+	}
+	return key
 }
 
 //+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunners,verbs=get;list;watch;create;update;patch;delete
@@ -399,10 +438,7 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 	// orgs from GiteaRunnerSets, so nothing else would ever reclaim the registration.
 	if runner.Status.RunnerID > 0 || runner.Spec.OrgName != "" {
 		// Read the teardown credential Secret.
-		teardownSecretName := types.NamespacedName{
-			Namespace: "gitea-actions-controller",
-			Name:      "gitea-teardown-credential",
-		}
+		teardownSecretName := r.teardownCredentialKey()
 		teardownSecret := &corev1.Secret{}
 		if err := r.Get(ctx, teardownSecretName, teardownSecret); err != nil {
 			log.Error(err, "failed to read teardown credential Secret", "secret", teardownSecretName)
@@ -517,7 +553,7 @@ func (r *EphemeralRunnerReconciler) constructPod(ctx context.Context, runner *gi
 			Labels:    labels,
 		},
 		Spec: corev1.PodSpec{
-			ServiceAccountName: "gitea-runner",
+			ServiceAccountName: r.runnerServiceAccountName(),
 			RestartPolicy:      corev1.RestartPolicyNever,
 			// ADR 0008: the resolved hard cap, kubelet-enforced independent of any
 			// operator logic. nil (unset) means no cap, matching the resolver's

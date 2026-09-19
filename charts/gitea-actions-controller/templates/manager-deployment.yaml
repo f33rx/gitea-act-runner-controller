@@ -25,6 +25,10 @@ spec:
           command: ["/manager"]
           args:
             - --leader-elect={{ .Values.manager.leaderElection.enabled }}
+            - --watch-namespaces={{ include "gitea-actions-controller.watchNamespacesFlag" . }}
+            - --teardown-credential-namespace={{ .Release.Namespace }}
+            - --teardown-credential-name={{ .Values.teardownCredential.secretName }}
+            - --runner-service-account={{ .Values.runner.serviceAccount.name }}
             - --default-active-deadline-seconds={{ .Values.manager.timeouts.defaultActiveDeadlineSeconds }}
             - --default-stall-window={{ .Values.manager.timeouts.defaultStallWindow }}
             - --default-pending-timeout={{ .Values.manager.timeouts.defaultPendingTimeout }}

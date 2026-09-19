@@ -17,7 +17,23 @@ spec:
     singular: gitearunnerset
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.minRunners
+      name: Min
+      type: integer
+    - jsonPath: .spec.maxRunners
+      name: Max
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .status.availableReplicas
+      name: Available
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: GiteaRunnerSet is the Schema for the gitearunnersets API.

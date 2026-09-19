@@ -47,6 +47,10 @@ type SweepReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// TeardownCredential locates the org-write Secret used to deregister orphaned
+	// runners. Zero value falls back to the Default* constants.
+	TeardownCredential types.NamespacedName
+
 	// SweepInterval controls how often the sweep runs. Defaults to
 	// defaultSweepInterval when zero.
 	SweepInterval time.Duration
@@ -112,10 +116,7 @@ func (r *SweepReconciler) sweep(ctx context.Context) {
 	logger := log.FromContext(ctx).WithName("sweep")
 
 	// Get the teardown credential Secret.
-	teardownSecretName := types.NamespacedName{
-		Namespace: "gitea-actions-controller",
-		Name:      "gitea-teardown-credential",
-	}
+	teardownSecretName := teardownCredentialOrDefault(r.TeardownCredential)
 	teardownSecret := &corev1.Secret{}
 	if err := r.Get(ctx, teardownSecretName, teardownSecret); err != nil {
 		logger.Error(err, "failed to read teardown credential Secret", "secret", teardownSecretName)

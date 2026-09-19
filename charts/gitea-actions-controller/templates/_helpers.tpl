@@ -68,3 +68,27 @@ to EphemeralRunnerSet spec/status. Never touches pods/runners/credentials direct
   resources: ["secrets"]
   verbs: ["get", "list", "watch"]
 {{- end -}}
+
+{{/*
+Effective watch-namespace list as a comma-joined string (templates cannot return
+lists; callers splitList ","). Always starts with the release namespace, because the
+teardown credential Secret and leader-election Lease live there and the manager must
+be able to read them whatever rbac.watchNamespaces says. Entries are tpl-rendered and
+de-duplicated.
+*/}}
+{{- define "gitea-actions-controller.watchNamespaces" -}}
+{{- $list := list .Release.Namespace -}}
+{{- range .Values.rbac.watchNamespaces -}}
+{{- $ns := tpl . $ -}}
+{{- if not (has $ns $list) -}}{{- $list = append $list $ns -}}{{- end -}}
+{{- end -}}
+{{- join "," $list -}}
+{{- end -}}
+
+{{/*
+Value for the --watch-namespaces flag: empty under clusterScope (cache everything),
+otherwise the effective list so the informer cache matches the Role grants.
+*/}}
+{{- define "gitea-actions-controller.watchNamespacesFlag" -}}
+{{- if not .Values.rbac.clusterScope -}}{{ include "gitea-actions-controller.watchNamespaces" . }}{{- end -}}
+{{- end -}}

@@ -25,6 +25,7 @@ spec:
           command: ["/listener"]
           args:
             - --poll-interval={{ .Values.listener.pollInterval }}
+            - --watch-namespaces={{ include "gitea-actions-controller.watchNamespacesFlag" . }}
           securityContext:
             {{- toYaml .Values.securityContext.container | nindent 12 }}
           resources:
