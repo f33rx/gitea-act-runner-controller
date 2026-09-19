@@ -17,6 +17,7 @@ limitations under the License.
 package gitea
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,10 +43,10 @@ func NewClient(baseURL, token string) *Client {
 
 // DeregisterOrgRunner deletes an ephemeral runner from an organization.
 // Returns the HTTP status code. 204 indicates success.
-func (c *Client) DeregisterOrgRunner(org string, runnerID int64) (int, error) {
+func (c *Client) DeregisterOrgRunner(ctx context.Context, org string, runnerID int64) (int, error) {
 	url := fmt.Sprintf("%s/api/v1/orgs/%s/actions/runners/%d", c.baseURL, org, runnerID)
 
-	req, err := http.NewRequest("DELETE", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -81,10 +82,10 @@ type ListOrgRunnersResponse struct {
 }
 
 // ListOrgRunners fetches all runners in an organization.
-func (c *Client) ListOrgRunners(org string) ([]Runner, error) {
+func (c *Client) ListOrgRunners(ctx context.Context, org string) ([]Runner, error) {
 	url := fmt.Sprintf("%s/api/v1/orgs/%s/actions/runners", c.baseURL, org)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -136,10 +137,10 @@ type ListOrgQueuedJobsResponse struct {
 
 // ListOrgQueuedJobs fetches queued jobs for an organization.
 // Per live-probe, the Gitea API returns job labels as an array of strings.
-func (c *Client) ListOrgQueuedJobs(org string) ([]Job, int, error) {
+func (c *Client) ListOrgQueuedJobs(ctx context.Context, org string) ([]Job, int, error) {
 	url := fmt.Sprintf("%s/api/v1/orgs/%s/actions/jobs?status=queued&limit=100", c.baseURL, org)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -181,10 +182,10 @@ type ListOrgInProgressJobsResponse struct {
 // job-log liveness). One org-scoped call surfaces every running job's Gitea job URL
 // (used to build the /logs URL) and its claiming runner_id/runner_name, avoiding a
 // per-repo enumeration to find which job a given EphemeralRunner claimed.
-func (c *Client) ListOrgInProgressJobs(org string) ([]Job, error) {
+func (c *Client) ListOrgInProgressJobs(ctx context.Context, org string) ([]Job, error) {
 	url := fmt.Sprintf("%s/api/v1/orgs/%s/actions/jobs?status=in_progress&limit=100", c.baseURL, org)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +217,7 @@ func (c *Client) ListOrgInProgressJobs(org string) ([]Job, error) {
 // body is never read. ADR 0008: this is the real job-log progress signal (verified
 // live: act_runner streams step output to Gitea via UpdateLog/gRPC independent of the
 // runner container's own stdout, which does NOT carry step output).
-func (c *Client) JobLogSize(jobURL string) (int64, error) {
+func (c *Client) JobLogSize(ctx context.Context, jobURL string) (int64, error) {
 	// Gitea renders job.url from its ROOT_URL, which is the browser-facing address and
 	// need not be reachable from inside the cluster (dev: http://localhost:3000). Keep
 	// only the path and issue the request against the base URL this client was built
@@ -225,7 +226,7 @@ func (c *Client) JobLogSize(jobURL string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("invalid job url %q: %w", jobURL, err)
 	}
-	req, err := http.NewRequest("GET", c.baseURL+parsed.Path+"/logs", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+parsed.Path+"/logs", nil)
 	if err != nil {
 		return 0, err
 	}
@@ -257,10 +258,10 @@ type RegistrationToken struct {
 
 // GetOrgRegistrationToken fetches a fresh registration token for an organization.
 // Returns the token string.
-func (c *Client) GetOrgRegistrationToken(org string) (string, error) {
+func (c *Client) GetOrgRegistrationToken(ctx context.Context, org string) (string, error) {
 	url := fmt.Sprintf("%s/api/v1/orgs/%s/actions/runners/registration-token", c.baseURL, org)
 
-	req, err := http.NewRequest("POST", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
 		return "", err
 	}

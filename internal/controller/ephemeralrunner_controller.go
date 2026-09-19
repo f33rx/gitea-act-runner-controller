@@ -329,7 +329,7 @@ func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runne
 		return fmt.Errorf("build Gitea client: %w", err)
 	}
 
-	jobs, err := giteaClient.ListOrgInProgressJobs(runner.Spec.OrgName)
+	jobs, err := giteaClient.ListOrgInProgressJobs(ctx, runner.Spec.OrgName)
 	if err != nil {
 		return fmt.Errorf("list in-progress jobs: %w", err)
 	}
@@ -364,7 +364,7 @@ func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runne
 		return nil
 	}
 
-	size, err := giteaClient.JobLogSize(jobURL)
+	size, err := giteaClient.JobLogSize(ctx, jobURL)
 	if err != nil {
 		return fmt.Errorf("read job log size: %w", err)
 	}
@@ -453,7 +453,7 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 		}
 
 		client := gitea.NewClient(runner.Spec.GiteaConfigURL, token)
-		ids, err := r.registrationsToDeregister(client, runner)
+		ids, err := r.registrationsToDeregister(ctx, client, runner)
 		if err != nil {
 			log.Error(err, "failed to resolve runner registration by name", "runner", runner.Name)
 			return ctrl.Result{Requeue: true}, err
@@ -461,7 +461,7 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 
 		for _, id := range ids {
 			log.Info("finalizer: deregistering runner from Gitea", "runner", runner.Name, "runnerId", id)
-			statusCode, err := client.DeregisterOrgRunner(runner.Spec.OrgName, id)
+			statusCode, err := client.DeregisterOrgRunner(ctx, runner.Spec.OrgName, id)
 			if err != nil {
 				log.Error(err, "deregister API call failed", "runnerId", id)
 				// Requeue on transient errors (network, etc).
@@ -495,11 +495,11 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 // recorded RunnerID when there is one, otherwise every ephemeral registration in the org
 // carrying this runner's name. Names are reused across generations, so a stale
 // registration from an earlier generation is reclaimed along with the current one.
-func (r *EphemeralRunnerReconciler) registrationsToDeregister(client *gitea.Client, runner *giteaactionsv1alpha1.EphemeralRunner) ([]int64, error) {
+func (r *EphemeralRunnerReconciler) registrationsToDeregister(ctx context.Context, client *gitea.Client, runner *giteaactionsv1alpha1.EphemeralRunner) ([]int64, error) {
 	if runner.Status.RunnerID > 0 {
 		return []int64{runner.Status.RunnerID}, nil
 	}
-	runners, err := client.ListOrgRunners(runner.Spec.OrgName)
+	runners, err := client.ListOrgRunners(ctx, runner.Spec.OrgName)
 	if err != nil {
 		return nil, err
 	}

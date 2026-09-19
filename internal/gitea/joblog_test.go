@@ -1,6 +1,7 @@
 package gitea
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -25,7 +26,7 @@ func TestJobLogSizeUsesClientBaseURL(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "tok")
-	size, err := c.JobLogSize("http://localhost:3000" + path)
+	size, err := c.JobLogSize(context.Background(), "http://localhost:3000"+path)
 	if err != nil {
 		t.Fatalf("JobLogSize: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestJobLogSizeRejectsUnknownLength(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "tok")
-	if _, err := c.JobLogSize(srv.URL + "/api/v1/repos/o/r/actions/jobs/1"); err == nil {
+	if _, err := c.JobLogSize(context.Background(), srv.URL+"/api/v1/repos/o/r/actions/jobs/1"); err == nil {
 		t.Fatal("expected an error for a response with no determinable length")
 	}
 }
@@ -65,7 +66,7 @@ func TestJobLogSizeRequestsIdentityEncoding(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "tok")
-	if _, err := c.JobLogSize(srv.URL + "/api/v1/repos/o/r/actions/jobs/1"); err != nil {
+	if _, err := c.JobLogSize(context.Background(), srv.URL+"/api/v1/repos/o/r/actions/jobs/1"); err != nil {
 		t.Fatalf("JobLogSize: %v", err)
 	}
 	if got != "identity" {

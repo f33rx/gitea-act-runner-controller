@@ -87,7 +87,10 @@ metadata:
   labels:
     app: gitea-runner-controller
 spec:
-  replicas: 1
+  # ADR 0009: 2 replicas, active-standby via leader election (--leader-elect below).
+  # Not more -- controller-runtime leader election is active-standby, not
+  # active-active, so a third replica adds cost with no additional safety.
+  replicas: 2
   selector:
     matchLabels:
       app: gitea-runner-controller
@@ -97,10 +100,19 @@ spec:
         app: gitea-runner-controller
     spec:
       serviceAccountName: gitea-runner-controller
+      # ADR 0009 Decision 4: must exceed the manager's GracefulShutdownTimeout (30s)
+      # so the kubelet does not SIGKILL mid-drain; a small margin absorbs the
+      # process's own shutdown bookkeeping on top of the drain itself.
+      terminationGracePeriodSeconds: 40
       containers:
       - name: controller
         image: gitea-runner-controller:latest
         imagePullPolicy: Never
+        args:
+        # ADR 0009: enabled by default in the shipped manifest, including for the
+        # single-replica local-dev flow -- exercising the same code path in dev as
+        # production avoids an HA-only path that stays untested until production.
+        - --leader-elect=true
         ports:
         - containerPort: 8080
           name: metrics
