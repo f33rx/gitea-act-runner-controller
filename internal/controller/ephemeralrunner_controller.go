@@ -58,14 +58,9 @@ const (
 	envGiteaRunnerOrgName  = "GITEA_RUNNER_ORG_NAME"
 )
 
-// Defaults for the deployment-specific names the manager is told about via flags.
-// They match config/manager and the e2e harness so a bare binary keeps working.
-// #nosec G101 -- Kubernetes object names, not credential material.
-const (
-	DefaultTeardownSecretNamespace  = "gitea-actions-controller"
-	DefaultTeardownSecretName       = "gitea-teardown-credential"
-	DefaultRunnerServiceAccountName = "gitea-runner"
-)
+// DefaultRunnerServiceAccountName matches config/samples and the e2e harness so a
+// bare binary keeps working.
+const DefaultRunnerServiceAccountName = "gitea-runner"
 
 // EphemeralRunnerReconciler reconciles an EphemeralRunner object.
 type EphemeralRunnerReconciler struct {
@@ -80,27 +75,11 @@ type EphemeralRunnerReconciler struct {
 	RunnerServiceAccountName string
 }
 
-func (r *EphemeralRunnerReconciler) teardownCredentialKey() types.NamespacedName {
-	return teardownCredentialOrDefault(r.TeardownCredential)
-}
-
 func (r *EphemeralRunnerReconciler) runnerServiceAccountName() string {
 	if r.RunnerServiceAccountName != "" {
 		return r.RunnerServiceAccountName
 	}
 	return DefaultRunnerServiceAccountName
-}
-
-// teardownCredentialOrDefault fills either half of an unset reference so a partially
-// configured reconciler still resolves to a usable key.
-func teardownCredentialOrDefault(key types.NamespacedName) types.NamespacedName {
-	if key.Namespace == "" {
-		key.Namespace = DefaultTeardownSecretNamespace
-	}
-	if key.Name == "" {
-		key.Name = DefaultTeardownSecretName
-	}
-	return key
 }
 
 //+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunners,verbs=get;list;watch;create;update;patch;delete
@@ -437,19 +416,11 @@ func (r *EphemeralRunnerReconciler) handleDeletion(ctx context.Context, runner *
 	// the sweep matters once the GiteaRunnerSet is gone (garc-6dx): the sweep discovers
 	// orgs from GiteaRunnerSets, so nothing else would ever reclaim the registration.
 	if runner.Status.RunnerID > 0 || runner.Spec.OrgName != "" {
-		// Read the teardown credential Secret.
-		teardownSecretName := r.teardownCredentialKey()
-		teardownSecret := &corev1.Secret{}
-		if err := r.Get(ctx, teardownSecretName, teardownSecret); err != nil {
-			log.Error(err, "failed to read teardown credential Secret", "secret", teardownSecretName)
-			// If we can't read the credential, we can't deregister. Requeue to retry.
+		token, err := readTeardownToken(ctx, r, r.TeardownCredential)
+		if err != nil {
+			// Without the credential nothing can be deregistered. Requeue to retry.
+			log.Error(err, "finalizer: cannot deregister")
 			return ctrl.Result{Requeue: true}, err
-		}
-
-		token := string(teardownSecret.Data["token"])
-		if token == "" {
-			log.Error(fmt.Errorf("empty token in teardown Secret"), "failed to get token")
-			return ctrl.Result{Requeue: true}, fmt.Errorf("empty token in teardown Secret")
 		}
 
 		client := gitea.NewClient(runner.Spec.GiteaConfigURL, token)
