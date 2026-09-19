@@ -115,17 +115,9 @@ func (r *SweepReconciler) Start(ctx context.Context) error {
 func (r *SweepReconciler) sweep(ctx context.Context) {
 	logger := log.FromContext(ctx).WithName("sweep")
 
-	// Get the teardown credential Secret.
-	teardownSecretName := teardownCredentialOrDefault(r.TeardownCredential)
-	teardownSecret := &corev1.Secret{}
-	if err := r.Get(ctx, teardownSecretName, teardownSecret); err != nil {
-		logger.Error(err, "failed to read teardown credential Secret", "secret", teardownSecretName)
-		return
-	}
-
-	token := string(teardownSecret.Data["token"])
-	if token == "" {
-		logger.Error(fmt.Errorf("empty token"), "failed to read token from teardown Secret")
+	token, err := readTeardownToken(ctx, r, r.TeardownCredential)
+	if err != nil {
+		logger.Error(err, "skipping sweep pass")
 		return
 	}
 
@@ -218,16 +210,10 @@ func (r *SweepReconciler) sweepOrgRunners(ctx context.Context, giteaURL, org, to
 
 		// Orphaned: no CR claims it.
 		logger.Info("found orphaned ephemeral runner, deregistering", "org", org, "runnerId", runnerRow.ID, "name", runnerRow.Name)
-		statusCode, err := client.DeregisterOrgRunner(ctx, org, runnerRow.ID)
-		if err != nil {
+		if err := client.DeregisterOrgRunner(ctx, org, runnerRow.ID); err != nil {
 			logger.Error(err, "failed to deregister orphaned runner", "runnerId", runnerRow.ID)
 			continue
 		}
-
-		if statusCode != 204 && statusCode != 404 {
-			logger.Error(fmt.Errorf("unexpected status code"), "deregister returned non-204", "statusCode", statusCode)
-		} else {
-			logger.Info("deregistered orphaned runner", "runnerId", runnerRow.ID, "statusCode", statusCode)
-		}
+		logger.Info("deregistered orphaned runner", "runnerId", runnerRow.ID)
 	}
 }
