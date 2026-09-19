@@ -36,6 +36,8 @@ manifests:
 	@echo "Generating CRDs..."
 	@zsh -lc 'cd $$(pwd) && mise exec -- $(CONTROLLER_GEN) crd paths=./api/... output:crd:dir=./config/crd'
 	@echo "manifests: OK (verify no \$$ref remains: grep -r '\''\$$ref'\'' config/crd should be empty)"
+	@cp config/crd/*.yaml charts/gitea-actions-controller/crds/
+	@echo "manifests: chart CRD copies synced"
 
 # Regenerate the DeepCopy methods (zz_generated.deepcopy.go).
 generate:

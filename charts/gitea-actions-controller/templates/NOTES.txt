@@ -1,0 +1,62 @@
+gitea-actions-controller has been installed into namespace {{ .Release.Namespace }}.
+
+{{- if .Values.rbac.clusterScope }}
+RBAC: cluster-scoped (ClusterRole). The operator can manage GiteaRunnerSets/pods/
+secrets in ANY namespace. Only enable this if you intend to run one shared operator
+across many teams' namespaces.
+{{- else }}
+RBAC: namespace-scoped (Role), watching:
+{{- range splitList "," (include "gitea-actions-controller.watchNamespaces" .) }}
+  - {{ . }}
+{{- end }}
+If you create a GiteaRunnerSet in a namespace NOT listed above, the operator will not
+have permission to manage it. Add the namespace to rbac.watchNamespaces and run
+`helm upgrade` -- new namespaces are not picked up automatically.
+{{- end }}
+
+{{- if .Values.runner.serviceAccount.create }}
+
+Runner ServiceAccount "{{ .Values.runner.serviceAccount.name }}" was created in:
+{{- range splitList "," (include "gitea-actions-controller.watchNamespaces" .) }}
+  - {{ . }}
+{{- end }}
+{{- if .Values.rbac.clusterScope }}
+Runner Pods in any OTHER namespace need it too (kubectl -n <ns> create serviceaccount
+{{ .Values.runner.serviceAccount.name }}), or add the namespace to rbac.watchNamespaces.
+{{- end }}
+{{- else }}
+
+runner.serviceAccount.create is false: every namespace holding a GiteaRunnerSet must
+already have a ServiceAccount named "{{ .Values.runner.serviceAccount.name }}" or
+runner Pods are rejected at admission.
+{{- end }}
+
+{{- if not .Values.manager.leaderElection.enabled }}
+
+manager.leaderElection.enabled is false (replicaCount={{ .Values.manager.replicaCount }}).
+For HA, set manager.leaderElection.enabled=true and manager.replicaCount=2 (see
+docs/adr/0009-ha-and-graceful-shutdown.md).
+{{- end }}
+
+{{- if not .Values.teardownCredential.create }}
+
+teardownCredential.create is false: this release expects a pre-existing Secret named
+"{{ .Values.teardownCredential.secretName }}" in {{ .Release.Namespace }} with a
+"token" key (an org-write Gitea credential, ADR 0006). Create it before the manager
+can deregister runners:
+
+  kubectl create secret generic {{ .Values.teardownCredential.secretName }} \
+    --namespace {{ .Release.Namespace }} \
+    --from-literal=token=<your-org-write-token>
+{{- end }}
+
+{{- if not .Values.giteaRunnerSet.enabled }}
+
+No GiteaRunnerSet was created by this release (giteaRunnerSet.enabled=false). Apply
+your own GiteaRunnerSet manifest(s) separately -- see config/samples/gitearunnerset.yaml
+for a starting point.
+{{- end }}
+
+Each GiteaRunnerSet's giteaConfigSecretRef must point at a Secret holding a Gitea token
+with read:organization AND read:repository (ADR 0006): the listener polls the org queue
+with the former, and stall detection (ADR 0008) reads job-log sizes with the latter.
