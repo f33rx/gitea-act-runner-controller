@@ -52,6 +52,10 @@ type EphemeralRunnerSetReconciler struct {
 	DefaultActiveDeadlineSeconds int64
 	DefaultStallWindow           time.Duration
 	DefaultPendingTimeout        time.Duration
+
+	// APIReader bypasses the cache to confirm a GiteaRunnerSet is really gone before
+	// the set deletes itself. Falls back to the cached client when nil.
+	APIReader client.Reader
 }
 
 //+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunnersets,verbs=get;list;watch;create;update;patch;delete
@@ -100,6 +104,9 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 		Name:      ers.Name,
 	}
 	if err := r.Get(ctx, grsKey, grs); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.handleMissingParent(ctx, ers, grsKey)
+		}
 		log.Error(err, "failed to get GiteaRunnerSet for EphemeralRunnerSet", "name", ers.Name)
 		return ctrl.Result{Requeue: true}, err
 	}
@@ -433,6 +440,39 @@ func (r *EphemeralRunnerSetReconciler) resolvePendingTimeout(grs *giteaactionsv1
 		return &metav1.Duration{Duration: r.DefaultPendingTimeout}
 	}
 	return nil
+}
+
+// handleMissingParent runs when the GiteaRunnerSet is absent from the cache. Either it
+// was deleted, in which case this set must go too or it keeps its runners forever
+// (garc-6dx; sets created before the listener stamped an owner reference are not
+// garbage-collected), or the listener created this set from its own cache before this
+// manager's cache observed the parent. The API server is consulted directly to tell
+// the two apart: a transient miss requeues, a confirmed absence deletes the set, which
+// cascades to its EphemeralRunners and their pods.
+func (r *EphemeralRunnerSetReconciler) handleMissingParent(ctx context.Context, ers *giteaactionsv1alpha1.EphemeralRunnerSet, grsKey types.NamespacedName) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+	if !ers.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	err := reader.Get(ctx, grsKey, &giteaactionsv1alpha1.GiteaRunnerSet{})
+	if err == nil {
+		log.V(1).Info("GiteaRunnerSet not yet in cache, requeueing", "name", ers.Name)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		log.Error(err, "failed to confirm GiteaRunnerSet absence", "name", ers.Name)
+		return ctrl.Result{}, err
+	}
+	log.Info("GiteaRunnerSet is gone, deleting orphaned EphemeralRunnerSet", "name", ers.Name, "namespace", ers.Namespace)
+	if err := r.Delete(ctx, ers); client.IgnoreNotFound(err) != nil {
+		log.Error(err, "failed to delete orphaned EphemeralRunnerSet", "name", ers.Name)
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
