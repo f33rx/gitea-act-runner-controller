@@ -41,14 +41,20 @@ func NewClient(baseURL, token string) *Client {
 	}
 }
 
-// DeregisterOrgRunner deletes an ephemeral runner from an organization.
-// Returns the HTTP status code. 204 indicates success.
-func (c *Client) DeregisterOrgRunner(ctx context.Context, org string, runnerID int64) (int, error) {
+// DeregisterOrgRunner deletes a runner registration from an organization. 204 and 404
+// both return nil: every caller wants "not registered" as the end state. Gitea answers
+// 404 not only for an absent runner but also for an unknown org and for a runner that
+// exists but belongs to another org or a repo (ADR 0006 hit that last case live), so
+// callers must only pass IDs obtained from ListOrgRunners on the same org and token;
+// any other ID can be reported as deregistered while the row remains. A token without
+// org-owner rights is 403 and surfaces as an error, as does any other non-204 status,
+// with Gitea's response body carried in the error.
+func (c *Client) DeregisterOrgRunner(ctx context.Context, org string, runnerID int64) error {
 	url := fmt.Sprintf("%s/api/v1/orgs/%s/actions/runners/%d", c.baseURL, org, runnerID)
 
 	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
 	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
@@ -56,14 +62,20 @@ func (c *Client) DeregisterOrgRunner(ctx context.Context, org string, runnerID i
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer resp.Body.Close()
 
-	// Drain the response body to allow connection reuse
-	_, _ = io.ReadAll(resp.Body)
+	// Read the body: it drains the connection for reuse and, on an unexpected status,
+	// carries Gitea's reason (e.g. which scope the token lacks).
+	body, _ := io.ReadAll(resp.Body)
 
-	return resp.StatusCode, nil
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusNotFound:
+		return nil
+	default:
+		return fmt.Errorf("deregister runner %d in org %s failed with status %d: %s", runnerID, org, resp.StatusCode, string(body))
+	}
 }
 
 // ListOrgRunners fetches the list of runners in an organization.
