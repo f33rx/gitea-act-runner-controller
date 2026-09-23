@@ -20,7 +20,7 @@ spec:
         {{- toYaml .Values.securityContext.pod | nindent 8 }}
       containers:
         - name: manager
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "gitea-actions-controller.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/manager"]
           args:
