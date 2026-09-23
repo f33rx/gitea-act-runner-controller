@@ -162,3 +162,32 @@ jobs:
             exit 1
           fi
           echo "generated artifacts: up to date"
+
+  # The chart is published on every release, so it is gated here like the Go code:
+  # it must lint, render under both RBAC modes, and carry the same CRDs as config/crd
+  # (Helm never upgrades crds/ after install, so a stale copy cannot be fixed later).
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: lint and render
+        run: |
+          if [ ! -d charts/gitea-actions-controller ]; then
+            echo "no chart on this branch; skipping"
+            exit 0
+          fi
+          helm lint charts/gitea-actions-controller
+          helm template t charts/gitea-actions-controller >/dev/null
+          helm template t charts/gitea-actions-controller --set rbac.clusterScope=true >/dev/null
+          echo "chart: lint and render OK"
+      - name: chart CRDs match config/crd
+        run: |
+          if [ ! -d charts/gitea-actions-controller ]; then exit 0; fi
+          if ! diff -r config/crd charts/gitea-actions-controller/crds; then
+            echo "Chart CRDs are stale. Run 'make manifests' and commit."
+            exit 1
+          fi
+          echo "chart CRDs: in sync"

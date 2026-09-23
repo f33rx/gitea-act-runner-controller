@@ -4,8 +4,11 @@
 # context (Autopilot-safe by default) choices.
 
 image:
-  repository: gitea-runner-controller
-  tag: latest
+  repository: ghcr.io/f33rx/gitea-act-runner-controller
+  # Empty means the chart's appVersion, which the release workflow sets to the image
+  # tag built from the same commit, so a chart version always installs the image it
+  # was released with. Override only to run a different build.
+  tag: ""
   pullPolicy: IfNotPresent
 
 # rbac controls the ClusterRole vs. namespace-scoped Role choice (ADR 0011 Decision 2,
