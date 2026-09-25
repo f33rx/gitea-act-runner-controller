@@ -15,4 +15,20 @@ spec:
     {{- toYaml .Values.giteaRunnerSet.labels | nindent 4 }}
   minRunners: {{ .Values.giteaRunnerSet.minRunners }}
   maxRunners: {{ .Values.giteaRunnerSet.maxRunners }}
+  {{- if and .Values.giteaRunnerSet.template .Values.giteaRunnerSet.resources }}
+  {{- fail "giteaRunnerSet.resources cannot be combined with giteaRunnerSet.template; set resources on the template's act-runner container" }}
+  {{- end }}
+  {{- with .Values.giteaRunnerSet.template }}
+  template:
+    {{- toYaml . | nindent 4 }}
+  {{- else }}
+  {{- with .Values.giteaRunnerSet.resources }}
+  template:
+    spec:
+      containers:
+        - name: act-runner
+          resources:
+            {{- toYaml . | nindent 12 }}
+  {{- end }}
+  {{- end }}
 {{- end }}

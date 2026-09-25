@@ -99,6 +99,12 @@ spec:
                   StallWindow is the resolved stall-detection window (ADR 0008), copied down from
                   the GiteaRunnerSet override or the manager default at creation time.
                 type: string
+              template:
+                description: |-
+                  Template is the GiteaRunnerSet's pod template as of this runner's creation, so a
+                  later template edit applies to new runners and never to a pod mid-job.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
             required:
             - giteaConfigUrl
             - giteaRunnerSetName

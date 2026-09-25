@@ -81,6 +81,9 @@ securityContext:
 
 # runner configures what the manager stamps onto every runner Pod it creates.
 runner:
+  # image is the runner container image for GiteaRunnerSets whose pod template does not
+  # set one. Empty uses the manager's built-in default.
+  image: ""
   # serviceAccount is set on each runner Pod, so it must exist in every namespace that
   # holds a GiteaRunnerSet or the Pod is rejected at admission. With create=true the
   # chart creates it (token automount off; act_runner never calls the Kubernetes API)
@@ -140,4 +143,10 @@ giteaRunnerSet:
   #       memory: ""
   # resources is the current (pre-ResourcePolicy) flat override for runner pod
   # requests/limits, applied uniformly regardless of repo/org (ADR 0011 Decision 3).
+  # Rendered onto an act-runner container; cannot be combined with template.
   resources: {}
+  # template is the runner PodTemplateSpec, rendered verbatim. garc forces the pod
+  # name, identifying labels, restartPolicy, activeDeadlineSeconds and act_runner env
+  # vars. At most one container: a regular sidecar keeps the pod Running after the job
+  # and blocks teardown, so sidecars go in initContainers with restartPolicy: Always.
+  template: {}

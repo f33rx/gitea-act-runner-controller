@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // EphemeralRunnerPhase is the phase of an ephemeral runner.
@@ -66,6 +67,12 @@ type EphemeralRunnerSpec struct {
 	// from the GiteaRunnerSet override or the manager default at creation time.
 	// +optional
 	PendingTimeout *metav1.Duration `json:"pendingTimeout,omitempty"`
+
+	// Template is the GiteaRunnerSet's pod template as of this runner's creation, so a
+	// later template edit applies to new runners and never to a pod mid-job.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Template *runtime.RawExtension `json:"template,omitempty"`
 }
 
 // EphemeralRunnerStatus defines the observed state of an EphemeralRunner.
