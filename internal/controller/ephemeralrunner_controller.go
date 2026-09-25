@@ -54,6 +54,7 @@ const (
 	resultFailed           = "failed"
 	resultStalled          = "stalled"
 	resultIdle             = "idle"
+	resultDisrupted        = "disrupted"
 	resultDeadlineExceeded = "deadline_exceeded"
 
 	// The kubelet's pod.status.reason for an activeDeadlineSeconds kill.
@@ -702,11 +703,71 @@ func (r *EphemeralRunnerReconciler) constructPod(ctx context.Context, runner *gi
 	return pod, nil
 }
 
+// podDisruption describes why Kubernetes stopped the pod (kubelet eviction,
+// preemption, drain, API eviction), or returns "" if it was not disrupted.
+func podDisruption(pod *corev1.Pod) string {
+	if pod.Status.Reason == "Evicted" {
+		if pod.Status.Message != "" {
+			return "Evicted: " + pod.Status.Message
+		}
+		return "Evicted"
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.DisruptionTarget && c.Status == corev1.ConditionTrue {
+			return c.Reason
+		}
+	}
+	return ""
+}
+
+// classifyFinishedPod decides a finished runner's outcome. act_runner exits 0 after
+// a failed job and on SIGTERM, and a pod evicted for disk can end Succeeded with no
+// eviction reason or condition left on it, so the pod phase alone does not say how the
+// job went. The claimed job's Gitea conclusion does; a job still unfinished when its
+// runner exited was cut off. The pod phase is the fallback when there is no claim or
+// Gitea cannot be read.
+func (r *EphemeralRunnerReconciler) classifyFinishedPod(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner, pod *corev1.Pod) (giteaactionsv1alpha1.EphemeralRunnerPhase, string, bool) {
+	failed := giteaactionsv1alpha1.EphemeralRunnerFailed
+	if pod.Status.Reason == deadlineExceededReason {
+		return failed, fmt.Sprintf("Pod failed: %s", pod.Status.Reason), false
+	}
+	if d := podDisruption(pod); d != "" {
+		return failed, fmt.Sprintf("Pod disrupted: %s", d), true
+	}
+	if runner.Status.JobRef != "" {
+		job, err := r.claimedJob(ctx, runner)
+		if err == nil {
+			switch {
+			case job.Status == "completed" && job.Conclusion == "success":
+				return giteaactionsv1alpha1.EphemeralRunnerSucceeded, "Job succeeded", false
+			case job.Status == "completed":
+				return failed, fmt.Sprintf("Job concluded %s", job.Conclusion), false
+			default:
+				return failed, fmt.Sprintf("Runner exited while its job was %s", job.Status), true
+			}
+		}
+		log.FromContext(ctx).Info("job outcome unavailable, classifying by pod phase", "runner", runner.Name, "error", err.Error())
+	}
+	if pod.Status.Phase == corev1.PodSucceeded {
+		return giteaactionsv1alpha1.EphemeralRunnerSucceeded, "Pod completed successfully", false
+	}
+	return failed, fmt.Sprintf("Pod failed: %s", pod.Status.Reason), false
+}
+
+func (r *EphemeralRunnerReconciler) claimedJob(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner) (*gitea.Job, error) {
+	giteaClient, err := r.giteaClientForRunner(ctx, runner)
+	if err != nil {
+		return nil, fmt.Errorf("build Gitea client: %w", err)
+	}
+	return giteaClient.GetJob(ctx, runner.Status.JobRef)
+}
+
 // updateRunnerStatusFromPod updates the runner status based on the Pod phase with conflict retry.
 func (r *EphemeralRunnerReconciler) updateRunnerStatusFromPod(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner, pod *corev1.Pod) {
 	log := log.FromContext(ctx)
 
 	now := metav1.Now()
+	disrupted := false
 
 	// Determine new status based on pod phase.
 	newPhase := runner.Status.Phase
@@ -723,12 +784,14 @@ func (r *EphemeralRunnerReconciler) updateRunnerStatusFromPod(ctx context.Contex
 			newPhase = giteaactionsv1alpha1.EphemeralRunnerRunning
 			newReason = "Pod is running"
 		}
-	case corev1.PodSucceeded:
-		newPhase = giteaactionsv1alpha1.EphemeralRunnerSucceeded
-		newReason = "Pod completed successfully"
-	case corev1.PodFailed:
-		newPhase = giteaactionsv1alpha1.EphemeralRunnerFailed
-		newReason = fmt.Sprintf("Pod failed: %s", pod.Status.Reason)
+	case corev1.PodSucceeded, corev1.PodFailed:
+		// Classified once: the Gitea read below must not repeat on every reconcile
+		// before teardown.
+		if runner.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerSucceeded ||
+			runner.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerFailed {
+			break
+		}
+		newPhase, newReason, disrupted = r.classifyFinishedPod(ctx, runner, pod)
 	default:
 		newPhase = giteaactionsv1alpha1.EphemeralRunnerFailed
 		newReason = fmt.Sprintf("Unknown pod phase: %s", pod.Status.Phase)
@@ -786,7 +849,10 @@ func (r *EphemeralRunnerReconciler) updateRunnerStatusFromPod(ctx context.Contex
 				// (ADR 0008's hard cap). Without its own label it is indistinguishable
 				// from an ordinary job failure, and the cap cannot be tuned from metrics.
 				result := resultFailed
-				if podReason == deadlineExceededReason {
+				switch {
+				case disrupted:
+					result = resultDisrupted
+				case podReason == deadlineExceededReason:
 					result = resultDeadlineExceeded
 				}
 				metrics.JobCompletedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace, result).Inc()

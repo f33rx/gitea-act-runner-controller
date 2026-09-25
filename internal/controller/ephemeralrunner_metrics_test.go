@@ -332,3 +332,147 @@ func TestReconcile_FirstSightingRecordsClaim(t *testing.T) {
 		t.Fatalf("LastProgressTime = %v, want the claim time", got.Status.LastProgressTime)
 	}
 }
+
+// garc-xqf: act_runner exits 0 on SIGTERM, so an evicted or preempted runner pod can end
+// Succeeded. It must be recorded as a failed, disrupted job, not a success.
+func TestUpdateRunnerStatusFromPod_DisruptedPodIsNotSuccess(t *testing.T) {
+	cases := []struct {
+		name       string
+		pod        corev1.PodStatus
+		wantPhase  giteaactionsv1alpha1.EphemeralRunnerPhase
+		wantResult string
+		wantReason string
+	}{
+		{
+			name: "kubelet eviction ending Succeeded",
+			pod: corev1.PodStatus{Phase: corev1.PodSucceeded, Reason: "Evicted",
+				Message: "Pod ephemeral local storage usage exceeds the total limit of containers 4Gi."},
+			wantPhase: giteaactionsv1alpha1.EphemeralRunnerFailed, wantResult: resultDisrupted,
+			wantReason: "Pod disrupted: Evicted: Pod ephemeral local storage usage exceeds the total limit of containers 4Gi.",
+		},
+		{
+			name: "preemption ending Succeeded",
+			pod: corev1.PodStatus{Phase: corev1.PodSucceeded, Conditions: []corev1.PodCondition{
+				{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "PreemptionByScheduler"}}},
+			wantPhase: giteaactionsv1alpha1.EphemeralRunnerFailed, wantResult: resultDisrupted,
+			wantReason: "Pod disrupted: PreemptionByScheduler",
+		},
+		{
+			name:      "eviction ending Failed",
+			pod:       corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted"},
+			wantPhase: giteaactionsv1alpha1.EphemeralRunnerFailed, wantResult: resultDisrupted,
+			wantReason: "Pod disrupted: Evicted",
+		},
+		{
+			name: "stale false DisruptionTarget is ignored",
+			pod: corev1.PodStatus{Phase: corev1.PodSucceeded, Conditions: []corev1.PodCondition{
+				{Type: corev1.DisruptionTarget, Status: corev1.ConditionFalse, Reason: "PreemptionByScheduler"}}},
+			wantPhase: giteaactionsv1alpha1.EphemeralRunnerSucceeded, wantResult: resultSucceeded,
+			wantReason: "Pod completed successfully",
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newTestScheme(t)
+			set := fmt.Sprintf("disrupt-set-%d", i)
+			runner := &giteaactionsv1alpha1.EphemeralRunner{
+				ObjectMeta: metav1.ObjectMeta{Name: "runner-disrupt", Namespace: "gitea-runners"},
+				Spec:       giteaactionsv1alpha1.EphemeralRunnerSpec{GiteaRunnerSetName: set},
+				Status:     giteaactionsv1alpha1.EphemeralRunnerStatus{Phase: giteaactionsv1alpha1.EphemeralRunnerRunning},
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(runner).WithObjects(runner).Build()
+			r := &EphemeralRunnerReconciler{Client: c, Scheme: scheme}
+
+			r.updateRunnerStatusFromPod(context.Background(), runner, &corev1.Pod{Status: tc.pod})
+
+			got := &giteaactionsv1alpha1.EphemeralRunner{}
+			if err := c.Get(context.Background(), types.NamespacedName{Namespace: "gitea-runners", Name: "runner-disrupt"}, got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Status.Phase != tc.wantPhase || got.Status.Reason != tc.wantReason {
+				t.Fatalf("status = %s %q, want %s %q", got.Status.Phase, got.Status.Reason, tc.wantPhase, tc.wantReason)
+			}
+			if n := testutil.ToFloat64(metrics.JobCompletedTotal.WithLabelValues(set, "gitea-runners", tc.wantResult)); n != 1 {
+				t.Errorf("completed_total{result=%s} = %v, want 1", tc.wantResult, n)
+			}
+			if tc.wantResult != resultSucceeded {
+				if n := testutil.ToFloat64(metrics.JobCompletedTotal.WithLabelValues(set, "gitea-runners", resultSucceeded)); n != 0 {
+					t.Errorf("completed_total{result=succeeded} = %v, want 0", n)
+				}
+			}
+		})
+	}
+}
+
+// A finished pod is classified by its claimed job's Gitea outcome. The "unfinished"
+// case is the status kind left on a runner evicted for disk: Succeeded, no reason, no
+// condition, with its job still in_progress.
+func TestUpdateRunnerStatusFromPod_ClassifiesByJobOutcome(t *testing.T) {
+	cases := []struct {
+		name       string
+		jobJSON    string
+		podPhase   corev1.PodPhase
+		wantPhase  giteaactionsv1alpha1.EphemeralRunnerPhase
+		wantResult string
+	}{
+		{"job succeeded", `{"status":"completed","conclusion":"success"}`, corev1.PodSucceeded,
+			giteaactionsv1alpha1.EphemeralRunnerSucceeded, resultSucceeded},
+		{"job failed but act_runner exited 0", `{"status":"completed","conclusion":"failure"}`, corev1.PodSucceeded,
+			giteaactionsv1alpha1.EphemeralRunnerFailed, resultFailed},
+		{"evicted with job unfinished", `{"status":"in_progress","conclusion":null}`, corev1.PodSucceeded,
+			giteaactionsv1alpha1.EphemeralRunnerFailed, resultDisrupted},
+		{"gitea unreadable falls back to pod phase", ``, corev1.PodSucceeded,
+			giteaactionsv1alpha1.EphemeralRunnerSucceeded, resultSucceeded},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.jobJSON == "" {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.jobJSON))
+			}))
+			defer srv.Close()
+
+			scheme := newTestScheme(t)
+			set := fmt.Sprintf("outcome-set-%d", i)
+			runner := &giteaactionsv1alpha1.EphemeralRunner{
+				ObjectMeta: metav1.ObjectMeta{Name: "runner-outcome", Namespace: "gitea-runners"},
+				Spec:       giteaactionsv1alpha1.EphemeralRunnerSpec{GiteaRunnerSetName: set},
+				Status: giteaactionsv1alpha1.EphemeralRunnerStatus{
+					Phase:  giteaactionsv1alpha1.EphemeralRunnerRunning,
+					JobRef: "http://gitea/api/v1/repos/org/repo/actions/jobs/7",
+				},
+			}
+			grs := &giteaactionsv1alpha1.GiteaRunnerSet{
+				ObjectMeta: metav1.ObjectMeta{Name: set, Namespace: "gitea-runners"},
+				Spec: giteaactionsv1alpha1.GiteaRunnerSetSpec{
+					GiteaConfigURL:       srv.URL,
+					GiteaConfigSecretRef: giteaactionsv1alpha1.SecretKeySelector{Name: "creds", Key: "token"},
+				},
+			}
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "gitea-runners"},
+				Data:       map[string][]byte{"token": []byte("tok")},
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(runner).
+				WithObjects(runner, grs, secret).Build()
+			r := &EphemeralRunnerReconciler{Client: c, Scheme: scheme}
+
+			r.updateRunnerStatusFromPod(context.Background(), runner, &corev1.Pod{Status: corev1.PodStatus{Phase: tc.podPhase}})
+
+			got := &giteaactionsv1alpha1.EphemeralRunner{}
+			if err := c.Get(context.Background(), types.NamespacedName{Namespace: "gitea-runners", Name: "runner-outcome"}, got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Status.Phase != tc.wantPhase {
+				t.Fatalf("phase = %s (%q), want %s", got.Status.Phase, got.Status.Reason, tc.wantPhase)
+			}
+			if n := testutil.ToFloat64(metrics.JobCompletedTotal.WithLabelValues(set, "gitea-runners", tc.wantResult)); n != 1 {
+				t.Errorf("completed_total{result=%s} = %v, want 1", tc.wantResult, n)
+			}
+		})
+	}
+}
