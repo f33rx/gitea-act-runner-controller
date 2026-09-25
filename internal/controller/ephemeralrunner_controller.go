@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	sigsjson "sigs.k8s.io/json"
 
 	giteaactionsv1alpha1 "github.com/f33rx/gitea-act-runner-controller/api/v1alpha1"
 	"github.com/f33rx/gitea-act-runner-controller/internal/gitea"
@@ -62,6 +64,10 @@ const (
 // bare binary keeps working.
 const DefaultRunnerServiceAccountName = "gitea-runner"
 
+// DefaultRunnerImage is the runner container image when neither the pod template nor
+// --default-runner-image names one.
+const DefaultRunnerImage = "gitea/act_runner:0.2.13"
+
 // EphemeralRunnerReconciler reconciles an EphemeralRunner object.
 type EphemeralRunnerReconciler struct {
 	client.Client
@@ -70,9 +76,12 @@ type EphemeralRunnerReconciler struct {
 	// TeardownCredential locates the org-write Secret the finalizer uses to
 	// deregister runners. Zero value falls back to the Default* constants.
 	TeardownCredential types.NamespacedName
-	// RunnerServiceAccountName is set on every runner Pod. Empty falls back to
-	// DefaultRunnerServiceAccountName.
+	// RunnerServiceAccountName is set on runner Pods whose template names none. Empty
+	// falls back to DefaultRunnerServiceAccountName.
 	RunnerServiceAccountName string
+	// RunnerImage is used when the template's runner container has no image. Empty
+	// falls back to DefaultRunnerImage.
+	RunnerImage string
 }
 
 func (r *EphemeralRunnerReconciler) runnerServiceAccountName() string {
@@ -80,6 +89,13 @@ func (r *EphemeralRunnerReconciler) runnerServiceAccountName() string {
 		return r.RunnerServiceAccountName
 	}
 	return DefaultRunnerServiceAccountName
+}
+
+func (r *EphemeralRunnerReconciler) runnerImage() string {
+	if r.RunnerImage != "" {
+		return r.RunnerImage
+	}
+	return DefaultRunnerImage
 }
 
 //+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunners,verbs=get;list;watch;create;update;patch;delete
@@ -150,7 +166,11 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.Get(ctx, podName, pod); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Create the Pod.
-			pod = r.constructPod(ctx, runner, secret)
+			pod, err = r.constructPod(ctx, runner, secret)
+			if err != nil {
+				log.Error(err, "failed to construct Pod")
+				return ctrl.Result{}, err
+			}
 			if err := controllerutil.SetControllerReference(runner, pod, r.Scheme); err != nil {
 				log.Error(err, "failed to set controller reference on Pod")
 				return ctrl.Result{}, err
@@ -499,15 +519,46 @@ func (r *EphemeralRunnerReconciler) constructTokenSecret(runner *giteaactionsv1a
 	}
 }
 
-// constructPod constructs the Pod for the runner.
-func (r *EphemeralRunnerReconciler) constructPod(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner, secret *corev1.Secret) *corev1.Pod {
+// runnerContainerName names the runner container garc adds to a template that has none.
+const runnerContainerName = "act-runner"
+
+// decodeRunnerTemplate strictly decodes a GiteaRunnerSet pod template. The CRD preserves
+// unknown fields, so a misspelled field is only caught here. At most one regular
+// container is allowed: a second one keeps the pod Running after act_runner exits, so
+// teardown never fires; sidecars must be native (initContainers, restartPolicy Always).
+func decodeRunnerTemplate(raw *runtime.RawExtension) (*corev1.PodTemplateSpec, error) {
+	tmpl := &corev1.PodTemplateSpec{}
+	if raw == nil || len(raw.Raw) == 0 {
+		return tmpl, nil
+	}
+	strictErrs, err := sigsjson.UnmarshalStrict(raw.Raw, tmpl, sigsjson.DisallowDuplicateFields, sigsjson.DisallowUnknownFields)
+	if err == nil && len(strictErrs) > 0 {
+		err = errors.Join(strictErrs...)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid runner pod template: %w", err)
+	}
+	if n := len(tmpl.Spec.Containers); n > 1 {
+		return nil, fmt.Errorf("invalid runner pod template: %d containers, want at most 1 (put sidecars in initContainers with restartPolicy: Always)", n)
+	}
+	return tmpl, nil
+}
+
+func (r *EphemeralRunnerReconciler) constructPod(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner, secret *corev1.Secret) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 
-	labels := map[string]string{
-		"app":              "gitea-runner",
-		"ephemeral-runner": runner.Name,
-		"gitearunner-set":  runner.Spec.GiteaRunnerSetName,
+	tmpl, err := decodeRunnerTemplate(runner.Spec.Template)
+	if err != nil {
+		return nil, err
 	}
+
+	labels := map[string]string{}
+	for k, v := range tmpl.Labels {
+		labels[k] = v
+	}
+	labels["app"] = "gitea-runner"
+	labels["ephemeral-runner"] = runner.Name
+	labels["gitearunner-set"] = runner.Spec.GiteaRunnerSetName
 
 	// Build runner labels in the format label:host for act_runner.
 	// Each label becomes "label:host" to use the host backend.
@@ -521,65 +572,81 @@ func (r *EphemeralRunnerReconciler) constructPod(ctx context.Context, runner *gi
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      runner.Name,
-			Namespace: runner.Namespace,
-			Labels:    labels,
+			Name:        runner.Name,
+			Namespace:   runner.Namespace,
+			Labels:      labels,
+			Annotations: tmpl.Annotations,
 		},
-		Spec: corev1.PodSpec{
-			ServiceAccountName: r.runnerServiceAccountName(),
-			RestartPolicy:      corev1.RestartPolicyNever,
-			// ADR 0008: the resolved hard cap, kubelet-enforced independent of any
-			// operator logic. nil (unset) means no cap, matching the resolver's
-			// "no default configured" case.
-			ActiveDeadlineSeconds: runner.Spec.ActiveDeadlineSeconds,
-			Containers: []corev1.Container{
-				{
-					Name:  "act-runner",
-					Image: "gitea/act_runner:0.2.13",
-					Env: []corev1.EnvVar{
-						{
-							Name: "GITEA_RUNNER_REGISTRATION_TOKEN",
-							ValueFrom: &corev1.EnvVarSource{
-								SecretKeyRef: &corev1.SecretKeySelector{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: secret.Name,
-									},
-									Key: envGiteaToken,
-								},
-							},
-						},
-						{
-							Name:  "GITEA_INSTANCE_URL",
-							Value: runner.Spec.GiteaConfigURL,
-						},
-						{
-							Name:  "GITEA_RUNNER_EPHEMERAL",
-							Value: "1",
-						},
-						{
-							// Pin the registered name instead of letting act_runner fall
-							// back to the pod hostname: the kubelet truncates hostnames at
-							// 63 chars, and recordLogProgress matches in-progress jobs by
-							// this name.
-							Name:  envGiteaRunnerName,
-							Value: runner.Name,
-						},
-						{
-							Name:  "GITEA_RUNNER_LABELS",
-							Value: runnerLabels,
-						},
-						{
-							Name:  "RUNNER_CAPACITY",
-							Value: "1",
-						},
+		Spec: tmpl.Spec,
+	}
+	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	// ADR 0008: the resolved hard cap, kubelet-enforced independent of any operator
+	// logic. nil (unset) means no cap, matching the resolver's "no default configured"
+	// case; a template value is overridden either way.
+	pod.Spec.ActiveDeadlineSeconds = runner.Spec.ActiveDeadlineSeconds
+	if pod.Spec.ServiceAccountName == "" {
+		pod.Spec.ServiceAccountName = r.runnerServiceAccountName()
+	}
+
+	if len(pod.Spec.Containers) == 0 {
+		pod.Spec.Containers = []corev1.Container{{Name: runnerContainerName}}
+	}
+	c := &pod.Spec.Containers[0]
+	if c.Image == "" {
+		c.Image = r.runnerImage()
+	}
+
+	garcEnv := []corev1.EnvVar{
+		{
+			Name: "GITEA_RUNNER_REGISTRATION_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: secret.Name,
 					},
+					Key: envGiteaToken,
 				},
 			},
 		},
+		{
+			Name:  "GITEA_INSTANCE_URL",
+			Value: runner.Spec.GiteaConfigURL,
+		},
+		{
+			Name:  "GITEA_RUNNER_EPHEMERAL",
+			Value: "1",
+		},
+		{
+			// Pin the registered name instead of letting act_runner fall back to the pod
+			// hostname: the kubelet truncates hostnames at 63 chars, and
+			// recordLogProgress matches in-progress jobs by this name.
+			Name:  envGiteaRunnerName,
+			Value: runner.Name,
+		},
+		{
+			Name:  "GITEA_RUNNER_LABELS",
+			Value: runnerLabels,
+		},
+		{
+			Name:  "RUNNER_CAPACITY",
+			Value: "1",
+		},
 	}
+	owned := make(map[string]bool, len(garcEnv))
+	for _, e := range garcEnv {
+		owned[e.Name] = true
+	}
+	env := make([]corev1.EnvVar, 0, len(c.Env)+len(garcEnv))
+	for _, e := range c.Env {
+		if !owned[e.Name] {
+			env = append(env, e)
+		}
+	}
+	env = append(env, garcEnv...)
+	c.Env = env
 
-	log.Info("constructed Pod for runner", "pod", pod.Name, "labels", labels)
-	return pod
+	log.Info("constructed Pod for runner", "pod", pod.Name, "labels", labels, "image", c.Image)
+	return pod, nil
 }
 
 // updateRunnerStatusFromPod updates the runner status based on the Pod phase with conflict retry.

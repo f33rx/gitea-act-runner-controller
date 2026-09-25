@@ -61,10 +61,10 @@ type GiteaRunnerSetSpec struct {
 	// MaxRunners is the maximum number of ephemeral runners to create.
 	MaxRunners int32 `json:"maxRunners,omitempty"`
 
-	// Template is the pod template spec for the runner pods (a corev1.PodTemplateSpec).
-	// Held as a RawExtension with preserved unknown fields so controller-gen emits a
-	// structural schema (x-kubernetes-preserve-unknown-fields) rather than a $ref to the
-	// embedded core type. Not consumed yet; optional.
+	// Template is the runner pod template (a corev1.PodTemplateSpec). garc forces the
+	// pod name, identifying labels, restartPolicy, activeDeadlineSeconds and act_runner
+	// env vars. At most one container; sidecars go in initContainers with restartPolicy
+	// Always. An unknown field or a second container blocks runner creation.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Template *runtime.RawExtension `json:"template,omitempty"`

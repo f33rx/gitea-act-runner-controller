@@ -67,6 +67,7 @@ func main() {
 	var watchNamespaces string
 	var teardownCredentialNamespace, teardownCredentialName string
 	var runnerServiceAccount string
+	var runnerImage string
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
 		"Comma-separated namespaces to cache and reconcile in. Required when the manager runs "+
 			"under namespace-scoped RBAC (a Role per namespace); the default cluster-wide cache "+
@@ -76,7 +77,9 @@ func main() {
 	flag.StringVar(&teardownCredentialName, "teardown-credential-name", controller.DefaultTeardownSecretName,
 		"Name of the Secret holding the org-write Gitea token used to deregister runners (ADR 0006).")
 	flag.StringVar(&runnerServiceAccount, "runner-service-account", controller.DefaultRunnerServiceAccountName,
-		"ServiceAccount name set on every runner Pod. Must exist in each namespace that holds a GiteaRunnerSet.")
+		"ServiceAccount name set on runner Pods whose template names none. Must exist in each namespace that holds a GiteaRunnerSet.")
+	flag.StringVar(&runnerImage, "default-runner-image", controller.DefaultRunnerImage,
+		"Runner container image used when a GiteaRunnerSet's pod template does not set one.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -141,6 +144,7 @@ func main() {
 		Scheme:                   mgr.GetScheme(),
 		TeardownCredential:       teardownCredential,
 		RunnerServiceAccountName: runnerServiceAccount,
+		RunnerImage:              runnerImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EphemeralRunner")
 		os.Exit(1)
@@ -162,6 +166,7 @@ func main() {
 		DefaultActiveDeadlineSeconds: defaultActiveDeadlineSeconds,
 		DefaultStallWindow:           defaultStallWindow,
 		DefaultPendingTimeout:        defaultPendingTimeout,
+		Recorder:                     mgr.GetEventRecorderFor("gitea-actions-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EphemeralRunnerSet")
 		os.Exit(1)

@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,6 +57,15 @@ type EphemeralRunnerSetReconciler struct {
 	// APIReader bypasses the cache to confirm a GiteaRunnerSet is really gone before
 	// the set deletes itself. Falls back to the cached client when nil.
 	APIReader client.Reader
+
+	// Recorder surfaces runner-set problems on the GiteaRunnerSet. Optional.
+	Recorder record.EventRecorder
+}
+
+func (r *EphemeralRunnerSetReconciler) warn(obj runtime.Object, reason, msg string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(obj, corev1.EventTypeWarning, reason, msg)
+	}
 }
 
 //+kubebuilder:rbac:groups=giteaactions.blackrabbitpursuits.com,resources=ephemeralrunnersets,verbs=get;list;watch;create;update;patch;delete
@@ -118,6 +128,13 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Scale up: create missing EphemeralRunners.
 	if currentCount < desiredCount {
+		// A template that cannot become a pod would leave every new runner without one.
+		if _, err := decodeRunnerTemplate(grs.Spec.Template); err != nil {
+			log.Error(err, "not creating runners: GiteaRunnerSet pod template is invalid", "name", grs.Name)
+			r.warn(grs, "InvalidTemplate", err.Error())
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
 		// Get the credential Secret to fetch registration tokens.
 		credSecret := &corev1.Secret{}
 		credKey := types.NamespacedName{
@@ -158,6 +175,13 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 				return ctrl.Result{Requeue: true}, err
 			}
 			log.Info("created EphemeralRunner", "runner", runner.Name)
+			// Create decodes the stored object back into runner. Helm never upgrades
+			// CRDs, and an EphemeralRunner CRD from before spec.template prunes it.
+			if grs.Spec.Template != nil && runner.Spec.Template == nil {
+				msg := "EphemeralRunner CRD predates spec.template, so runners ignore the pod template; apply the chart's crds/ directory"
+				log.Error(nil, msg, "runner", runner.Name)
+				r.warn(grs, "StaleCRD", msg)
+			}
 		}
 	}
 
@@ -398,6 +422,7 @@ func (r *EphemeralRunnerSetReconciler) constructEphemeralRunner(
 			ActiveDeadlineSeconds: r.resolveActiveDeadlineSeconds(grs),
 			StallWindow:           r.resolveStallWindow(grs),
 			PendingTimeout:        r.resolvePendingTimeout(grs),
+			Template:              grs.Spec.Template.DeepCopy(),
 		},
 	}
 

@@ -57,6 +57,12 @@ your own GiteaRunnerSet manifest(s) separately -- see config/samples/gitearunner
 for a starting point.
 {{- end }}
 
+Upgrading: helm installs crds/ only on first install. After `helm upgrade`, apply the
+chart's CRDs too, or new fields such as the runner pod template are dropped:
+
+  helm pull oci://ghcr.io/f33rx/charts/gitea-actions-controller --version {{ .Chart.Version }} --untar
+  kubectl apply --server-side -f gitea-actions-controller/crds/
+
 Each GiteaRunnerSet's giteaConfigSecretRef must point at a Secret holding a Gitea token
 with read:organization AND read:repository (ADR 0006): the listener polls the org queue
 with the former, and stall detection (ADR 0008) reads job-log sizes with the latter.
