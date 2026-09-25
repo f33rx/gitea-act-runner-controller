@@ -87,6 +87,19 @@ runner:
   # never published) needs image set explicitly.
   image: ""
   imageRepository: ghcr.io/f33rx/gitea-act-runner
+  # resources is applied to the runner container per resource name when its template
+  # sets neither a request nor a limit for that name. Without it Autopilot defaults to
+  # 1Gi ephemeral storage, which a checkout plus setup-node and setup-python exceeds.
+  # Autopilot requires ephemeral-storage limits equal to requests. cpu matches the
+  # Autopilot default so small clusters still fit several runners. null disables.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+      ephemeral-storage: 4Gi
+    limits:
+      memory: 2Gi
+      ephemeral-storage: 4Gi
   # serviceAccount is set on each runner Pod, so it must exist in every namespace that
   # holds a GiteaRunnerSet or the Pod is rejected at admission. With create=true the
   # chart creates it (token automount off; act_runner never calls the Kubernetes API)

@@ -63,6 +63,9 @@ chart's CRDs too, or new fields such as the runner pod template are dropped:
   helm pull oci://ghcr.io/f33rx/charts/gitea-actions-controller --version {{ .Chart.Version }} --untar
   kubectl apply --server-side -f gitea-actions-controller/crds/
 
+`helm upgrade --reuse-values` ignores defaults added in newer chart versions (such as
+runner.resources); use --reset-then-reuse-values to pick them up.
+
 Each GiteaRunnerSet's giteaConfigSecretRef must point at a Secret holding a Gitea token
 with read:organization AND read:repository (ADR 0006): the listener polls the org queue
 with the former, and stall detection (ADR 0008) reads job-log sizes with the latter.
