@@ -76,15 +76,16 @@ type GiteaRunnerSetSpec struct {
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
 
 	// StallWindow overrides the manager-wide default stall-detection window (ADR 0008):
-	// how long a Running runner may show no progress signal (pod-phase/condition
-	// transitions) before the operator treats the job as stuck, fails it, and tears the
-	// runner down. Omit to use the manager default.
+	// how long a runner that has claimed a job may show no job-log growth before the
+	// operator treats the job as stuck and tears the runner down. Omit to use the
+	// manager default.
 	// +optional
 	StallWindow *metav1.Duration `json:"stallWindow,omitempty"`
 
-	// PendingTimeout overrides the manager-wide default for how long a runner may stay
-	// Pending (never claimed a job) before the operator treats pod creation as failed
-	// and retries with capped backoff (ADR 0008). Omit to use the manager default.
+	// PendingTimeout overrides the manager-wide default for how long a runner may go
+	// without claiming a job, whether its pod is still Pending or Running and idle,
+	// before the operator deletes it and retries with capped backoff (ADR 0008). Omit to
+	// use the manager default.
 	// +optional
 	PendingTimeout *metav1.Duration `json:"pendingTimeout,omitempty"`
 }
