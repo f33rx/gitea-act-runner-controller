@@ -1,4 +1,4 @@
-.PHONY: help build test lint security fmt vet clean docker-build docker-load manifests generate e2e e2e-keep
+.PHONY: help build test lint security fmt vet clean docker-build docker-load runner-image manifests generate e2e e2e-keep
 
 # Pin tool versions so local runs match CI. goimports/gosec @latest now require
 # Go 1.25; these are the last releases that build under the pinned Go 1.24.
@@ -23,6 +23,7 @@ help:
 	@echo "  clean            - Clean build artifacts"
 	@echo "  docker-build     - Build Docker image"
 	@echo "  docker-load      - Load Docker image into kind cluster"
+	@echo "  runner-image     - Build the default runner image (runner/Dockerfile)"
 	@echo "  e2e              - Full kind+Gitea end-to-end proof (creates + deletes cluster)"
 	@echo "  e2e-keep         - Same as e2e but leaves the cluster up for inspection"
 
@@ -115,6 +116,10 @@ docker-build: build
 docker-load: docker-build
 	@echo "Loading Docker image into garc-dev kind cluster..."
 	@kind load docker-image --name garc-dev gitea-runner-controller:latest
+
+runner-image:
+	@echo "Building runner image..."
+	@docker build -t gitea-act-runner:dev runner
 
 # Install tools needed for build
 install-tools:

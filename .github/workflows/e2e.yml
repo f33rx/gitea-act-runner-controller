@@ -22,9 +22,10 @@ env:
   GO_VERSION: "1.24.13"
   GOTOOLCHAIN: local
   IMAGE: gitea-runner-controller:latest
+  RUNNER_IMAGE: gitea-act-runner:dev
   CLUSTER: garc-dev
   # Give each phase a generous budget; the ubuntu runner is slower than a laptop and
-  # pulls the Gitea + act_runner images cold.
+  # pulls the Gitea image cold and builds the runner image.
   TIMEOUT: "420"
 
 jobs:
@@ -68,8 +69,13 @@ jobs:
           cluster_name: ${{ env.CLUSTER }}
           wait: 120s
 
-      - name: Load image into kind
-        run: kind load docker-image --name "${CLUSTER}" "${IMAGE}"
+      - name: Build runner image
+        run: docker build -t "${RUNNER_IMAGE}" runner
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image --name "${CLUSTER}" "${IMAGE}"
+          kind load docker-image --name "${CLUSTER}" "${RUNNER_IMAGE}"
 
       # helm and kubectl are provided by kind-action's toolchain / the runner image.
       - name: Run end-to-end proof
