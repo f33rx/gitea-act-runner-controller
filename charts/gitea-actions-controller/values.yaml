@@ -82,8 +82,11 @@ securityContext:
 # runner configures what the manager stamps onto every runner Pod it creates.
 runner:
   # image is the runner container image for GiteaRunnerSets whose pod template does not
-  # set one. Empty uses the manager's built-in default.
+  # set one. Empty means imageRepository at the chart's appVersion, the runner image
+  # released with this chart. Installing from a source checkout (appVersion v0.1.0,
+  # never published) needs image set explicitly.
   image: ""
+  imageRepository: ghcr.io/f33rx/gitea-act-runner
   # serviceAccount is set on each runner Pod, so it must exist in every namespace that
   # holds a GiteaRunnerSet or the Pod is rejected at admission. With create=true the
   # chart creates it (token automount off; act_runner never calls the Kubernetes API)

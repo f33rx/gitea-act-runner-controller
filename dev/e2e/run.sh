@@ -13,6 +13,7 @@
 #   CLUSTER   kind cluster name           (default: garc-dev)
 #   KEEP      1 = do not delete the cluster on exit (default: unset -> cleaned up in CI)
 #   TIMEOUT   per-phase wait budget, secs  (default: 300)
+#   RUNNER_IMAGE  runner image, built from runner/ (default: gitea-act-runner:dev)
 set -euo pipefail
 
 CLUSTER="${CLUSTER:-garc-dev}"
@@ -27,6 +28,7 @@ API="http://localhost:${LOCAL_PORT}/api/v1"
 ADMIN_USER="gitea_admin"
 ADMIN_PASS="gitea_admin_pw_dev"
 CONTROLLER_NS="gitea-actions-controller"
+RUNNER_IMAGE="${RUNNER_IMAGE:-gitea-act-runner:dev}"
 
 log()  { printf '\n[e2e] %s\n' "$*" >&2; }
 fail() { printf '\n[e2e][FAIL] %s\n' "$*" >&2; dump_diagnostics; exit 1; }
@@ -116,6 +118,8 @@ log "building + loading controller image"
 # and load it before calling this script. Locally we chain the Makefile target.
 if [ "${SKIP_IMAGE_BUILD:-0}" != "1" ]; then
   make -C "${REPO_ROOT}" docker-load >/dev/null
+  docker build -t "${RUNNER_IMAGE}" "${REPO_ROOT}/runner"
+  kind load docker-image --name "${CLUSTER}" "${RUNNER_IMAGE}"
 fi
 
 log "applying CRDs + operator + listener"
@@ -160,7 +164,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: act-runner
-          image: gitea/act_runner:0.2.13
+          image: ${RUNNER_IMAGE}
 YAML
 
 # baseline must be clean before we trigger

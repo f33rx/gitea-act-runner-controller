@@ -109,6 +109,10 @@ jobs:
   hello:
     runs-on: ubuntu-latest
     steps:
+      # Node-based actions and a paging git command catch a runner image without node
+      # or with a pager, both of which break real workflows.
+      - uses: actions/checkout@v4
+      - run: git log --oneline -1
       - run: echo "hello from garc dev runner"
       - run: echo "job=${{ github.job }} sha=${{ github.sha }}"
       # A short sleep so the ephemeral runner is observably "live" for a beat: a

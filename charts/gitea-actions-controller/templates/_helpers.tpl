@@ -97,3 +97,11 @@ otherwise the effective list so the informer cache matches the Role grants.
 {{- define "gitea-actions-controller.image" -}}
 {{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) -}}
 {{- end -}}
+
+{{- define "gitea-actions-controller.runnerImage" -}}
+{{- if .Values.runner.image -}}
+{{- .Values.runner.image -}}
+{{- else if .Values.runner.imageRepository -}}
+{{- printf "%s:%s" .Values.runner.imageRepository .Chart.AppVersion -}}
+{{- end -}}
+{{- end -}}

@@ -66,7 +66,7 @@ const DefaultRunnerServiceAccountName = "gitea-runner"
 
 // DefaultRunnerImage is the runner container image when neither the pod template nor
 // --default-runner-image names one.
-const DefaultRunnerImage = "gitea/act_runner:0.2.13"
+const DefaultRunnerImage = "ghcr.io/f33rx/gitea-act-runner:latest"
 
 // EphemeralRunnerReconciler reconciles an EphemeralRunner object.
 type EphemeralRunnerReconciler struct {

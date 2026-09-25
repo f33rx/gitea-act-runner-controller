@@ -29,7 +29,7 @@ spec:
             - --teardown-credential-namespace={{ .Release.Namespace }}
             - --teardown-credential-name={{ .Values.teardownCredential.secretName }}
             - --runner-service-account={{ .Values.runner.serviceAccount.name }}
-            {{- with .Values.runner.image }}
+            {{- with include "gitea-actions-controller.runnerImage" . }}
             - --default-runner-image={{ . }}
             {{- end }}
             - --default-active-deadline-seconds={{ .Values.manager.timeouts.defaultActiveDeadlineSeconds }}
