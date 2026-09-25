@@ -82,6 +82,8 @@ type EphemeralRunnerReconciler struct {
 	// RunnerImage is used when the template's runner container has no image. Empty
 	// falls back to DefaultRunnerImage.
 	RunnerImage string
+	// RunnerResources fills in resources the template's runner container leaves unset.
+	RunnerResources corev1.ResourceRequirements
 }
 
 func (r *EphemeralRunnerReconciler) runnerServiceAccountName() string {
@@ -544,6 +546,42 @@ func decodeRunnerTemplate(raw *runtime.RawExtension) (*corev1.PodTemplateSpec, e
 	return tmpl, nil
 }
 
+// applyDefaultResources copies each default resource the container sets neither a
+// request nor a limit for. A resource the template names is left whole: filling only
+// its missing side could put a limit below the template's request.
+func applyDefaultResources(dst *corev1.ResourceRequirements, def corev1.ResourceRequirements) {
+	names := map[corev1.ResourceName]bool{}
+	for n := range def.Requests {
+		names[n] = true
+	}
+	for n := range def.Limits {
+		names[n] = true
+	}
+	for n := range names {
+		if _, ok := dst.Requests[n]; ok {
+			continue
+		}
+		if _, ok := dst.Limits[n]; ok {
+			continue
+		}
+		if q, ok := def.Requests[n]; ok {
+			if dst.Requests == nil {
+				dst.Requests = corev1.ResourceList{}
+			}
+			dst.Requests[n] = q.DeepCopy()
+		}
+		if q, ok := def.Limits[n]; ok {
+			if dst.Limits == nil {
+				dst.Limits = corev1.ResourceList{}
+			}
+			dst.Limits[n] = q.DeepCopy()
+		}
+	}
+}
+
+// constructPod builds the runner Pod from the runner's template snapshot, then forces
+// the fields garc depends on: the pod is found by name and labels, restartPolicy Never
+// keeps it ephemeral, and the act_runner env vars carry registration and identity.
 func (r *EphemeralRunnerReconciler) constructPod(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner, secret *corev1.Secret) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 
@@ -595,6 +633,7 @@ func (r *EphemeralRunnerReconciler) constructPod(ctx context.Context, runner *gi
 	if c.Image == "" {
 		c.Image = r.runnerImage()
 	}
+	applyDefaultResources(&c.Resources, r.RunnerResources)
 
 	garcEnv := []corev1.EnvVar{
 		{

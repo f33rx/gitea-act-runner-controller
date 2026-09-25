@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"os"
 	"time"
@@ -68,6 +69,7 @@ func main() {
 	var teardownCredentialNamespace, teardownCredentialName string
 	var runnerServiceAccount string
 	var runnerImage string
+	var runnerResources string
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
 		"Comma-separated namespaces to cache and reconcile in. Required when the manager runs "+
 			"under namespace-scoped RBAC (a Role per namespace); the default cluster-wide cache "+
@@ -80,6 +82,9 @@ func main() {
 		"ServiceAccount name set on runner Pods whose template names none. Must exist in each namespace that holds a GiteaRunnerSet.")
 	flag.StringVar(&runnerImage, "default-runner-image", controller.DefaultRunnerImage,
 		"Runner container image used when a GiteaRunnerSet's pod template does not set one.")
+	flag.StringVar(&runnerResources, "default-runner-resources", "",
+		"JSON corev1.ResourceRequirements applied to the runner container for each resource "+
+			"its template sets neither a request nor a limit for. Empty = no defaults.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -139,12 +144,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	var defaultRunnerResources corev1.ResourceRequirements
+	if runnerResources != "" {
+		if err := json.Unmarshal([]byte(runnerResources), &defaultRunnerResources); err != nil {
+			setupLog.Error(err, "invalid --default-runner-resources")
+			os.Exit(1)
+		}
+	}
+
 	if err = (&controller.EphemeralRunnerReconciler{
 		Client:                   mgr.GetClient(),
 		Scheme:                   mgr.GetScheme(),
 		TeardownCredential:       teardownCredential,
 		RunnerServiceAccountName: runnerServiceAccount,
 		RunnerImage:              runnerImage,
+		RunnerResources:          defaultRunnerResources,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EphemeralRunner")
 		os.Exit(1)

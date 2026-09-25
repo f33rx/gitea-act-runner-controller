@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -270,5 +271,54 @@ func TestDecodeRunnerTemplate(t *testing.T) {
 	}
 	if _, err := decodeRunnerTemplate(nil); err != nil {
 		t.Fatalf("nil template: %v", err)
+	}
+}
+
+func TestConstructPod_DefaultResources(t *testing.T) {
+	// The shape the chart renders into --default-runner-resources; --set turns cpu into a
+	// JSON number.
+	var def corev1.ResourceRequirements
+	if err := json.Unmarshal([]byte(`{"requests":{"cpu":1,"memory":"2Gi","ephemeral-storage":"4Gi"},"limits":{"memory":"2Gi","ephemeral-storage":"4Gi"}}`), &def); err != nil {
+		t.Fatal(err)
+	}
+	r := &EphemeralRunnerReconciler{RunnerResources: def}
+	q := func(l corev1.ResourceList, n corev1.ResourceName) string {
+		v, ok := l[n]
+		if !ok {
+			return "unset"
+		}
+		return v.String()
+	}
+
+	pod := podFixture(t, r, "")
+	c := pod.Spec.Containers[0]
+	if q(c.Resources.Requests, corev1.ResourceCPU) != "1" || q(c.Resources.Limits, corev1.ResourceCPU) != "unset" {
+		t.Fatalf("cpu = %v / %v", c.Resources.Requests, c.Resources.Limits)
+	}
+	if q(c.Resources.Requests, corev1.ResourceEphemeralStorage) != "4Gi" || q(c.Resources.Limits, corev1.ResourceEphemeralStorage) != "4Gi" {
+		t.Fatalf("ephemeral-storage = %v / %v", c.Resources.Requests, c.Resources.Limits)
+	}
+
+	// A template naming a resource keeps it whole: an 8Gi request alone must not gain
+	// the 4Gi default limit, which would put the limit below the request. Unnamed
+	// resources still get defaults.
+	pod = podFixture(t, r, `{"spec":{"containers":[{"name":"act-runner","resources":{
+	  "requests":{"ephemeral-storage":"8Gi"},
+	  "limits":{"memory":"6Gi"}}}]}}`)
+	c = pod.Spec.Containers[0]
+	if q(c.Resources.Requests, corev1.ResourceEphemeralStorage) != "8Gi" || q(c.Resources.Limits, corev1.ResourceEphemeralStorage) != "unset" {
+		t.Fatalf("ephemeral-storage = %v / %v, want the template's alone", c.Resources.Requests, c.Resources.Limits)
+	}
+	if q(c.Resources.Limits, corev1.ResourceMemory) != "6Gi" || q(c.Resources.Requests, corev1.ResourceMemory) != "unset" {
+		t.Fatalf("memory = %v / %v, want the template's alone", c.Resources.Requests, c.Resources.Limits)
+	}
+	if q(c.Resources.Requests, corev1.ResourceCPU) != "1" {
+		t.Fatalf("cpu request = %s, want the default", q(c.Resources.Requests, corev1.ResourceCPU))
+	}
+
+	// Defaults must not leak between pods through shared maps.
+	c.Resources.Requests[corev1.ResourceCPU] = resource.MustParse("9")
+	if got := r.RunnerResources.Requests[corev1.ResourceCPU]; got.String() != "1" {
+		t.Fatalf("default mutated through a pod: cpu = %s", got.String())
 	}
 }

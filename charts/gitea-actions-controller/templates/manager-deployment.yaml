@@ -32,6 +32,9 @@ spec:
             {{- with include "gitea-actions-controller.runnerImage" . }}
             - --default-runner-image={{ . }}
             {{- end }}
+            {{- with .Values.runner.resources }}
+            - {{ printf "--default-runner-resources=%s" (toJson .) | quote }}
+            {{- end }}
             - --default-active-deadline-seconds={{ .Values.manager.timeouts.defaultActiveDeadlineSeconds }}
             - --default-stall-window={{ .Values.manager.timeouts.defaultStallWindow }}
             - --default-pending-timeout={{ .Values.manager.timeouts.defaultPendingTimeout }}
