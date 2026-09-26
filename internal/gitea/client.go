@@ -126,11 +126,13 @@ func (c *Client) ListOrgRunners(ctx context.Context, org string) ([]Runner, erro
 
 // Job represents a job from Gitea (queued or in-progress).
 type Job struct {
-	ID       int64  `json:"id"`
-	URL      string `json:"url"`
-	Name     string `json:"name"`
-	Status   string `json:"status"`
-	RunnerID int64  `json:"runner_id"`
+	ID     int64  `json:"id"`
+	URL    string `json:"url"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	// Conclusion is set once Status is "completed": success, failure, cancelled, skipped.
+	Conclusion string `json:"conclusion"`
+	RunnerID   int64  `json:"runner_id"`
 	// RunnerName is the name act_runner registered under, which the operator sets to
 	// the EphemeralRunner name; the operator never learns runner_id, so this is how an
 	// in-progress job is matched back to its runner.
@@ -261,6 +263,36 @@ func (c *Client) JobLogSize(ctx context.Context, jobURL string) (int64, error) {
 		return 0, fmt.Errorf("job log response has unknown length (Content-Encoding %q)", resp.Header.Get("Content-Encoding"))
 	}
 	return resp.ContentLength, nil
+}
+
+// GetJob reads a job by its API URL (Job.URL), against this client's base URL for the
+// same reason as JobLogSize.
+func (c *Client) GetJob(ctx context.Context, jobURL string) (*Job, error) {
+	parsed, err := url.Parse(jobURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid job url %q: %w", jobURL, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+parsed.Path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get job failed with status %d", resp.StatusCode)
+	}
+	var job Job
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return nil, fmt.Errorf("decode job: %w", err)
+	}
+	return &job, nil
 }
 
 // RegistrationToken represents a registration token response.
