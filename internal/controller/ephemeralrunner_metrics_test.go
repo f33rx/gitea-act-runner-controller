@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,44 +175,135 @@ func TestReconcile_PodRecreationDoesNotRewindRunningPhase(t *testing.T) {
 // phase and updateRunnerStatusFromPod never counts it. The completion must be counted at
 // the kill site instead, or started_total stays permanently ahead of completed_total.
 func TestReconcile_StallKillCountsCompletion(t *testing.T) {
+	cases := []struct {
+		name        string
+		claimed     bool
+		wantResult  string
+		wantStalled float64
+	}{
+		// A claimed job whose log stopped growing past the window is a stall.
+		{"claimed job with no log progress", true, resultStalled, 1},
+		// garc-bds: a runner that never claimed a job is reaped by the pre-claim
+		// timeout as idle, never counted as a stall.
+		{"idle runner never claimed a job", false, resultIdle, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newTestScheme(t)
+			stale := metav1.NewTime(time.Now().Add(-5 * time.Minute))
+			set := "stall-set-" + tc.wantResult
+			const logSize = 10
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if strings.HasSuffix(req.URL.Path, "/logs") {
+					_, _ = w.Write([]byte(strings.Repeat("x", logSize)))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if !tc.claimed {
+					_, _ = w.Write([]byte(`{"jobs":[],"total_count":0}`))
+					return
+				}
+				_, _ = fmt.Fprintf(w, `{"jobs":[{"id":1,"url":"http://gitea/org/repo/actions/runs/1/jobs/0","status":"in_progress","runner_name":"runner-stall","started_at":%q}],"total_count":1}`,
+					stale.UTC().Format(time.RFC3339))
+			}))
+			defer srv.Close()
+
+			runner := &giteaactionsv1alpha1.EphemeralRunner{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "runner-stall",
+					Namespace:  "gitea-runners",
+					Finalizers: []string{finalizerEphemeralRunner},
+				},
+				Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
+					GiteaRunnerSetName: set,
+					OrgName:            "org",
+					RegistrationToken:  "tok",
+					StallWindow:        &metav1.Duration{Duration: 30 * time.Second},
+					PendingTimeout:     &metav1.Duration{Duration: 30 * time.Second},
+				},
+				Status: giteaactionsv1alpha1.EphemeralRunnerStatus{
+					Phase:          giteaactionsv1alpha1.EphemeralRunnerRunning,
+					PodName:        "runner-stall",
+					PhaseStartTime: &stale,
+				},
+			}
+			if tc.claimed {
+				runner.Status.JobRef = "http://gitea/org/repo/actions/runs/1/jobs/0"
+				runner.Status.LastJobLogSize = logSize
+				runner.Status.LastProgressTime = &stale
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "runner-stall", Namespace: "gitea-runners"},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			grs := &giteaactionsv1alpha1.GiteaRunnerSet{
+				ObjectMeta: metav1.ObjectMeta{Name: set, Namespace: "gitea-runners"},
+				Spec: giteaactionsv1alpha1.GiteaRunnerSetSpec{
+					GiteaConfigURL:       srv.URL,
+					GiteaConfigSecretRef: giteaactionsv1alpha1.SecretKeySelector{Name: "creds", Key: "token"},
+				},
+			}
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "gitea-runners"},
+				Data:       map[string][]byte{"token": []byte("tok")},
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(runner).
+				WithObjects(runner, pod, grs, secret).Build()
+			r := &EphemeralRunnerReconciler{Client: c, Scheme: scheme}
+
+			before := testutil.ToFloat64(metrics.JobCompletedTotal.WithLabelValues(set, "gitea-runners", tc.wantResult))
+			key := types.NamespacedName{Namespace: runner.Namespace, Name: runner.Name}
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			after := testutil.ToFloat64(metrics.JobCompletedTotal.WithLabelValues(set, "gitea-runners", tc.wantResult))
+			if after != before+1 {
+				t.Fatalf("completed_total{result=%s} = %v, want %v", tc.wantResult, after, before+1)
+			}
+			if got := testutil.ToFloat64(metrics.RunnerStalledTotal.WithLabelValues(set, "gitea-runners")); got != tc.wantStalled {
+				t.Errorf("runner_stalled_total = %v, want %v", got, tc.wantStalled)
+			}
+		})
+	}
+}
+
+// The first sighting of a runner's job is its claim: it records JobRef and starts the
+// stall clock at that moment, so a runner that sat idle before claiming is not killed.
+func TestReconcile_FirstSightingRecordsClaim(t *testing.T) {
 	scheme := newTestScheme(t)
-	stale := metav1.NewTime(time.Now().Add(-5 * time.Minute))
+	idleSince := metav1.NewTime(time.Now().Add(-5 * time.Minute))
+	const jobURL = "http://gitea/org/repo/actions/runs/1/jobs/0"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasSuffix(req.URL.Path, "/logs") {
+			_, _ = w.Write([]byte("x"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"jobs":[{"id":1,"url":%q,"status":"in_progress","runner_name":"runner-claim","started_at":%q}],"total_count":1}`,
+			jobURL, time.Now().UTC().Format(time.RFC3339))
+	}))
+	defer srv.Close()
+
 	runner := &giteaactionsv1alpha1.EphemeralRunner{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "runner-stall",
-			Namespace:  "gitea-runners",
-			Finalizers: []string{finalizerEphemeralRunner},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "runner-claim", Namespace: "gitea-runners", Finalizers: []string{finalizerEphemeralRunner}},
 		Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
-			GiteaRunnerSetName: "stall-set",
+			GiteaRunnerSetName: "claim-set",
 			OrgName:            "org",
-			RegistrationToken:  "tok",
-			// The liveness read will fail against the unreachable stub URL below, which
-			// is a hard error, so Reconcile would fail open and skip the stall check. A
-			// nil window instead leaves checkTimeout on its PhaseStartTime fallback,
-			// which is already past due -- the stall-kill path this test targets.
-			StallWindow: &metav1.Duration{Duration: 30 * time.Second},
+			StallWindow:        &metav1.Duration{Duration: time.Minute},
+			PendingTimeout:     &metav1.Duration{Duration: 10 * time.Minute},
 		},
 		Status: giteaactionsv1alpha1.EphemeralRunnerStatus{
 			Phase:          giteaactionsv1alpha1.EphemeralRunnerRunning,
-			PodName:        "runner-stall",
-			PhaseStartTime: &stale,
+			PodName:        "runner-claim",
+			PhaseStartTime: &idleSince,
 		},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "runner-stall", Namespace: "gitea-runners"},
+		ObjectMeta: metav1.ObjectMeta{Name: "runner-claim", Namespace: "gitea-runners"},
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	// recordLogProgress builds a Gitea client from the parent set + secret. Point it at a
-	// stub that returns an empty in-progress job list: no matching job means it returns
-	// nil (not an error), so Reconcile proceeds to checkTimeout instead of failing open.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jobs":[],"total_count":0}`))
-	}))
-	defer srv.Close()
 	grs := &giteaactionsv1alpha1.GiteaRunnerSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "stall-set", Namespace: "gitea-runners"},
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-set", Namespace: "gitea-runners"},
 		Spec: giteaactionsv1alpha1.GiteaRunnerSetSpec{
 			GiteaConfigURL:       srv.URL,
 			GiteaConfigSecretRef: giteaactionsv1alpha1.SecretKeySelector{Name: "creds", Key: "token"},
@@ -224,17 +317,18 @@ func TestReconcile_StallKillCountsCompletion(t *testing.T) {
 		WithObjects(runner, pod, grs, secret).Build()
 	r := &EphemeralRunnerReconciler{Client: c, Scheme: scheme}
 
-	before := testutil.ToFloat64(metrics.JobCompletedTotal.WithLabelValues("stall-set", "gitea-runners", resultStalled))
 	key := types.NamespacedName{Namespace: runner.Namespace, Name: runner.Name}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	after := testutil.ToFloat64(metrics.JobCompletedTotal.WithLabelValues("stall-set", "gitea-runners", resultStalled))
-
-	if after != before+1 {
-		t.Fatalf("completed_total{result=stalled} = %v, want %v", after, before+1)
+	got := &giteaactionsv1alpha1.EphemeralRunner{}
+	if err := c.Get(context.Background(), key, got); err != nil {
+		t.Fatalf("runner was deleted, want it kept: %v", err)
 	}
-	if got := testutil.ToFloat64(metrics.RunnerStalledTotal.WithLabelValues("stall-set", "gitea-runners")); got < 1 {
-		t.Errorf("runner_stalled_total = %v, want >= 1", got)
+	if got.Status.JobRef != jobURL {
+		t.Fatalf("JobRef = %q, want %q", got.Status.JobRef, jobURL)
+	}
+	if got.Status.LastProgressTime == nil || time.Since(got.Status.LastProgressTime.Time) > time.Minute {
+		t.Fatalf("LastProgressTime = %v, want the claim time", got.Status.LastProgressTime)
 	}
 }

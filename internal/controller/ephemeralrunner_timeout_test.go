@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -34,8 +35,10 @@ func TestCheckTimeout_RunningPastStallWindowIsStuck(t *testing.T) {
 	start := metav1.NewTime(time.Now().Add(-20 * time.Minute))
 	runner := &giteaactionsv1alpha1.EphemeralRunner{
 		Status: giteaactionsv1alpha1.EphemeralRunnerStatus{
-			Phase:          giteaactionsv1alpha1.EphemeralRunnerRunning,
-			PhaseStartTime: &start,
+			Phase:            giteaactionsv1alpha1.EphemeralRunnerRunning,
+			PhaseStartTime:   &start,
+			JobRef:           "job",
+			LastProgressTime: &start,
 		},
 		Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
 			StallWindow: &metav1.Duration{Duration: 15 * time.Minute},
@@ -63,6 +66,7 @@ func TestCheckTimeout_RunningWithRecentLogProgressIsLeftAlone(t *testing.T) {
 			Phase:            giteaactionsv1alpha1.EphemeralRunnerRunning,
 			PhaseStartTime:   &longAgo,
 			LastProgressTime: &recentProgress,
+			JobRef:           "job",
 		},
 		Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
 			StallWindow: &metav1.Duration{Duration: 15 * time.Minute},
@@ -86,6 +90,7 @@ func TestCheckTimeout_RunningWithStaleLogProgressIsStuck(t *testing.T) {
 			Phase:            giteaactionsv1alpha1.EphemeralRunnerRunning,
 			PhaseStartTime:   &longAgo,
 			LastProgressTime: &staleProgress,
+			JobRef:           "job",
 		},
 		Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
 			StallWindow: &metav1.Duration{Duration: 15 * time.Minute},
@@ -106,8 +111,10 @@ func TestCheckTimeout_RunningUnderStallWindowIsLeftAlone(t *testing.T) {
 	start := metav1.NewTime(time.Now().Add(-5 * time.Minute))
 	runner := &giteaactionsv1alpha1.EphemeralRunner{
 		Status: giteaactionsv1alpha1.EphemeralRunnerStatus{
-			Phase:          giteaactionsv1alpha1.EphemeralRunnerRunning,
-			PhaseStartTime: &start,
+			Phase:            giteaactionsv1alpha1.EphemeralRunnerRunning,
+			PhaseStartTime:   &start,
+			JobRef:           "job",
+			LastProgressTime: &start,
 		},
 		Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
 			StallWindow: &metav1.Duration{Duration: 15 * time.Minute},
@@ -246,5 +253,56 @@ func TestCheckTimeout_TerminalPhasesAreIgnored(t *testing.T) {
 		if timedOut, _ := r.checkTimeout(runner); timedOut {
 			t.Errorf("phase %s must not be flagged by checkTimeout (handled by auto-teardown instead)", phase)
 		}
+	}
+}
+
+// garc-bds: a Running runner that never claimed a job is idle, not stalled. It must
+// survive the stall window and be reaped only by the pre-claim timeout.
+func TestCheckTimeout_IdleRunnerIsNotStalled(t *testing.T) {
+	r := &EphemeralRunnerReconciler{}
+	started := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	runner := &giteaactionsv1alpha1.EphemeralRunner{
+		Status: giteaactionsv1alpha1.EphemeralRunnerStatus{
+			Phase:          giteaactionsv1alpha1.EphemeralRunnerRunning,
+			PhaseStartTime: &started,
+		},
+		Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
+			StallWindow:    &metav1.Duration{Duration: time.Minute},
+			PendingTimeout: &metav1.Duration{Duration: 5 * time.Minute},
+		},
+	}
+	if timedOut, reason := r.checkTimeout(runner); timedOut {
+		t.Fatalf("idle runner past the stall window but under the pending timeout was killed: %s", reason)
+	}
+
+	long := metav1.NewTime(time.Now().Add(-6 * time.Minute))
+	runner.Status.PhaseStartTime = &long
+	timedOut, reason := r.checkTimeout(runner)
+	if !timedOut || !strings.HasPrefix(reason, "idle timeout") {
+		t.Fatalf("idle runner past the pending timeout: timedOut=%v reason=%q, want an idle timeout", timedOut, reason)
+	}
+
+	runner.Spec.PendingTimeout = nil
+	if timedOut, _ := r.checkTimeout(runner); timedOut {
+		t.Fatal("with no pending timeout an idle runner must never be reaped")
+	}
+}
+
+// A claimed job with no log progress yet is anchored at the claim, not at pod start.
+func TestCheckTimeout_ClaimedRunnerAnchorsAtClaim(t *testing.T) {
+	r := &EphemeralRunnerReconciler{}
+	podStart := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	claim := metav1.NewTime(time.Now().Add(-30 * time.Second))
+	runner := &giteaactionsv1alpha1.EphemeralRunner{
+		Status: giteaactionsv1alpha1.EphemeralRunnerStatus{
+			Phase:            giteaactionsv1alpha1.EphemeralRunnerRunning,
+			PhaseStartTime:   &podStart,
+			JobRef:           "job",
+			LastProgressTime: &claim,
+		},
+		Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{StallWindow: &metav1.Duration{Duration: time.Minute}},
+	}
+	if timedOut, reason := r.checkTimeout(runner); timedOut {
+		t.Fatalf("job claimed 30s ago killed on a 1m window: %s", reason)
 	}
 }

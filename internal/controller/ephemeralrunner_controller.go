@@ -53,6 +53,7 @@ const (
 	resultSucceeded        = "succeeded"
 	resultFailed           = "failed"
 	resultStalled          = "stalled"
+	resultIdle             = "idle"
 	resultDeadlineExceeded = "deadline_exceeded"
 
 	// The kubelet's pod.status.reason for an activeDeadlineSeconds kill.
@@ -235,13 +236,13 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		log.Error(err, "failed to refetch runner for timeout check")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
-	if latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning && latest.Spec.StallWindow != nil {
+	if latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning &&
+		(latest.Spec.StallWindow != nil || latest.Spec.PendingTimeout != nil) {
 		if err := r.recordLogProgress(ctx, latest); err != nil {
-			// Fail open: with no usable liveness signal the PhaseStartTime fallback would
-			// condemn every job longer than the stall window (a credential without
-			// read:repository does exactly that), and ADR 0008 prefers a missed stall
-			// over killing a live job. Logged at Info so a persistent misconfiguration is
-			// visible.
+			// Fail open: without this read there is no claim or progress signal (a
+			// credential without read:repository fails here), and ADR 0008 prefers a
+			// missed stall over killing a live job. Logged at Info so a persistent
+			// misconfiguration is visible.
 			log.Info("stall liveness signal unavailable, skipping stall check", "runner", latest.Name, "error", err.Error())
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
@@ -253,10 +254,16 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// here rather than transitioning through a terminal phase, so
 		// updateRunnerStatusFromPod never sees it again -- count the completion here or
 		// a stalled runner inflates started_total with no matching completed_total.
-		if latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning {
+		switch {
+		case latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning && latest.Status.JobRef == "":
+			// Counted as started when its pod ran, so it needs a completion too, but it
+			// never had a job to stall.
+			metrics.RunnerPendingTimeoutTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace).Inc()
+			metrics.JobCompletedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace, resultIdle).Inc()
+		case latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning:
 			metrics.RunnerStalledTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace).Inc()
 			metrics.JobCompletedTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace, resultStalled).Inc()
-		} else {
+		default:
 			// A Pending runner never reached Running, so it was never counted as started
 			// and must not be counted as completed.
 			metrics.RunnerPendingTimeoutTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace).Inc()
@@ -281,21 +288,24 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 func (r *EphemeralRunnerReconciler) checkTimeout(runner *giteaactionsv1alpha1.EphemeralRunner) (bool, string) {
 	switch runner.Status.Phase {
 	case giteaactionsv1alpha1.EphemeralRunnerRunning:
-		if runner.Spec.StallWindow == nil {
+		// A runner that has not claimed a job is idle, not stalled: it falls under the
+		// pre-claim timeout, measured from when it started running. Scale-down never
+		// removes a Running runner, so this is what reaps one whose job went elsewhere.
+		if runner.Status.JobRef == "" {
+			if runner.Spec.PendingTimeout == nil || runner.Status.PhaseStartTime == nil {
+				return false, ""
+			}
+			elapsed := time.Since(runner.Status.PhaseStartTime.Time)
+			if elapsed >= runner.Spec.PendingTimeout.Duration {
+				return true, fmt.Sprintf("idle timeout: no job claimed for %s (timeout %s)", elapsed.Round(time.Second), runner.Spec.PendingTimeout.Duration)
+			}
 			return false, ""
 		}
-		// LastProgressTime (log-growth liveness) is the primary signal; recordLogProgress
-		// keeps it moving whenever the container log grows. If log-checking is disabled
-		// or has not observed anything yet, fall back to PhaseStartTime so stall
-		// detection still degrades to the coarser pod-phase-only signal instead of
-		// silently never firing.
+		// recordLogProgress sets LastProgressTime at the claim and on each log growth.
+		if runner.Spec.StallWindow == nil || runner.Status.LastProgressTime == nil {
+			return false, ""
+		}
 		anchor := runner.Status.LastProgressTime
-		if anchor == nil {
-			anchor = runner.Status.PhaseStartTime
-		}
-		if anchor == nil {
-			return false, ""
-		}
 		elapsed := time.Since(anchor.Time)
 		if elapsed >= runner.Spec.StallWindow.Duration {
 			return true, fmt.Sprintf("stalled: no log progress for %s (window %s)", elapsed.Round(time.Second), runner.Spec.StallWindow.Duration)
@@ -360,8 +370,7 @@ func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runne
 		}
 	}
 	if jobURL == "" {
-		// The runner hasn't (yet) claimed a job Gitea reports as in-progress -- nothing
-		// to measure growth against this reconcile.
+		// Not claimed yet, or already finished: nothing to record.
 		return nil
 	}
 
@@ -369,7 +378,10 @@ func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runne
 	if err != nil {
 		return fmt.Errorf("read job log size: %w", err)
 	}
-	if size <= runner.Status.LastJobLogSize {
+	// The first sighting of a job is the claim: it starts the stall clock whatever the
+	// log size, and a reused runner name must not compare against the previous job's.
+	claimed := runner.Status.JobRef != jobURL
+	if !claimed && size <= runner.Status.LastJobLogSize {
 		return nil
 	}
 
@@ -381,6 +393,7 @@ func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runne
 		}
 		latest.Status.LastProgressTime = &now
 		latest.Status.LastJobLogSize = size
+		latest.Status.JobRef = jobURL
 		if err := r.Status().Update(ctx, latest); err != nil {
 			if apierrors.IsConflict(err) && i < 2 {
 				continue
@@ -391,6 +404,7 @@ func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runne
 		}
 		runner.Status.LastProgressTime = &now
 		runner.Status.LastJobLogSize = size
+		runner.Status.JobRef = jobURL
 		return nil
 	}
 	return nil

@@ -99,11 +99,12 @@ func main() {
 		"Default hard cap (seconds) on total EphemeralRunner pod lifetime, kubelet-enforced. "+
 			"0 = no default cap unless a GiteaRunnerSet sets activeDeadlineSeconds itself.")
 	flag.DurationVar(&defaultStallWindow, "default-stall-window", 15*time.Minute,
-		"Default duration a Running EphemeralRunner may show no phase-change progress before "+
-			"it is presumed stuck and torn down. 0 disables stall detection by default.")
+		"Default duration an EphemeralRunner with a claimed job may show no job-log growth "+
+			"before it is presumed stuck and torn down. 0 disables stall detection by default.")
 	flag.DurationVar(&defaultPendingTimeout, "default-pending-timeout", 5*time.Minute,
-		"Default duration an EphemeralRunner may stay Pending (never claimed a job) before "+
-			"it is deleted and retried with backoff by the owning EphemeralRunnerSet. "+
+		"Default duration an EphemeralRunner may go without claiming a job (pod Pending, or "+
+			"Running and idle) before it is deleted and retried with backoff by the owning "+
+			"EphemeralRunnerSet. "+
 			"0 disables pending-timeout detection by default.")
 	opts := zap.Options{
 		Development: true,
