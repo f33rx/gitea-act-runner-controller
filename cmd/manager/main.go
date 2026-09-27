@@ -160,6 +160,7 @@ func main() {
 		RunnerServiceAccountName: runnerServiceAccount,
 		RunnerImage:              runnerImage,
 		RunnerResources:          defaultRunnerResources,
+		Recorder:                 mgr.GetEventRecorderFor("gitea-actions-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EphemeralRunner")
 		os.Exit(1)
