@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	giteaactionsv1alpha1 "github.com/f33rx/gitea-act-runner-controller/api/v1alpha1"
@@ -472,6 +473,110 @@ func TestUpdateRunnerStatusFromPod_ClassifiesByJobOutcome(t *testing.T) {
 			}
 			if n := testutil.ToFloat64(metrics.JobCompletedTotal.WithLabelValues(set, "gitea-runners", tc.wantResult)); n != 1 {
 				t.Errorf("completed_total{result=%s} = %v, want 1", tc.wantResult, n)
+			}
+		})
+	}
+}
+
+// minRunners is a floor on idle runners: an idle runner within it is kept past the
+// pending timeout, one beyond it is reaped, and busy siblings do not count whether Gitea
+// or JobRef shows them busy. A kept runner must still match its set and stay young
+// enough to leave its job most of the pod deadline.
+func TestReconcile_IdleBaselineRunnerIsKept(t *testing.T) {
+	const sibling = "warm-set-runner-1"
+	for _, tc := range []struct {
+		name        string
+		siblings    int
+		siblingBusy string // "", "jobref" or "gitea"
+		idleFor     time.Duration
+		deadline    int64
+		labelsDrift bool
+		wantKept    bool
+	}{
+		{name: "only runner, minRunners 1", wantKept: true},
+		{name: "one idle runner over minRunners 1", siblings: 1},
+		{name: "sibling busy by JobRef", siblings: 1, siblingBusy: "jobref", wantKept: true},
+		{name: "sibling busy in Gitea before its JobRef lands", siblings: 1, siblingBusy: "gitea", wantKept: true},
+		{name: "set labels changed since the runner was built", labelsDrift: true},
+		{name: "idle past the baseline cap", idleFor: 2 * time.Hour},
+		{name: "idle past half the pod deadline", deadline: 900},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobs := `{"jobs":[],"total_count":0}`
+			if tc.siblingBusy == "gitea" {
+				jobs = `{"jobs":[{"id":9,"status":"in_progress","runner_name":"` + sibling + `","started_at":"2026-09-27T14:00:00Z"}],"total_count":1}`
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(jobs))
+			}))
+			defer srv.Close()
+
+			scheme := newTestScheme(t)
+			idleFor := tc.idleFor
+			if idleFor == 0 {
+				idleFor = 10 * time.Minute
+			}
+			idleSince := metav1.NewTime(time.Now().Add(-idleFor))
+			mk := func(name string) *giteaactionsv1alpha1.EphemeralRunner {
+				r := &giteaactionsv1alpha1.EphemeralRunner{
+					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "gitea-runners", Finalizers: []string{finalizerEphemeralRunner}},
+					Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
+						GiteaRunnerSetName: "warm-set",
+						GiteaConfigURL:     srv.URL,
+						OrgName:            "org",
+						Labels:             []string{"ubuntu-latest"},
+						PendingTimeout:     &metav1.Duration{Duration: 5 * time.Minute},
+					},
+					Status: giteaactionsv1alpha1.EphemeralRunnerStatus{
+						Phase:          giteaactionsv1alpha1.EphemeralRunnerRunning,
+						PodName:        name,
+						PhaseStartTime: &idleSince,
+					},
+				}
+				if tc.deadline > 0 {
+					r.Spec.ActiveDeadlineSeconds = &tc.deadline
+				}
+				return r
+			}
+			setLabels := []string{"ubuntu-latest"}
+			if tc.labelsDrift {
+				setLabels = []string{"ubuntu-24.04"}
+			}
+			runner := mk("warm-set-runner-0")
+			objs := []client.Object{runner,
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: runner.Name, Namespace: "gitea-runners"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}},
+				&giteaactionsv1alpha1.GiteaRunnerSet{
+					ObjectMeta: metav1.ObjectMeta{Name: "warm-set", Namespace: "gitea-runners"},
+					Spec: giteaactionsv1alpha1.GiteaRunnerSetSpec{
+						GiteaConfigURL:       srv.URL,
+						GiteaConfigSecretRef: giteaactionsv1alpha1.SecretKeySelector{Name: "creds", Key: "token"},
+						OrgName:              "org",
+						Labels:               setLabels,
+						MinRunners:           1,
+					},
+				},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "gitea-runners"}, Data: map[string][]byte{"token": []byte("tok")}},
+			}
+			for i := 0; i < tc.siblings; i++ {
+				sib := mk(sibling)
+				if tc.siblingBusy == "jobref" {
+					sib.Status.JobRef = "http://gitea/api/v1/repos/org/repo/actions/jobs/1"
+				}
+				objs = append(objs, sib)
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(runner).WithObjects(objs...).Build()
+			r := &EphemeralRunnerReconciler{Client: c, Scheme: scheme}
+
+			key := types.NamespacedName{Namespace: runner.Namespace, Name: runner.Name}
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			got := &giteaactionsv1alpha1.EphemeralRunner{}
+			err := c.Get(context.Background(), key, got)
+			kept := err == nil && got.DeletionTimestamp.IsZero()
+			if kept != tc.wantKept {
+				t.Fatalf("kept = %v, want %v (err %v)", kept, tc.wantKept, err)
 			}
 		})
 	}

@@ -42,7 +42,7 @@ func TestScaleUpRunnerTemplate(t *testing.T) {
 			}
 			ers := &giteaactionsv1alpha1.EphemeralRunnerSet{
 				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, UID: "ers-uid"},
-				Spec:       giteaactionsv1alpha1.EphemeralRunnerSetSpec{Replicas: 1},
+				Spec:       giteaactionsv1alpha1.EphemeralRunnerSetSpec{Replicas: 1, PatchID: 1},
 			}
 			creds := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: key.Namespace},

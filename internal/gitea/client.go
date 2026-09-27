@@ -141,69 +141,60 @@ type Job struct {
 	StartedAt  string   `json:"started_at"`
 }
 
-// ListOrgQueuedJobsResponse is the API response for queued jobs.
-// The Gitea API returns the jobs under the "jobs" key (verified live against
-// 1.26.1: GET /orgs/{org}/actions/jobs?status=queued -> {"jobs": [...], "total_count": N}).
-type ListOrgQueuedJobsResponse struct {
+// ListOrgJobsResponse is the API response for an org's jobs. The Gitea API returns the
+// jobs under the "jobs" key (verified live against 1.26.1).
+type ListOrgJobsResponse struct {
 	Jobs       []Job `json:"jobs"`
 	TotalCount int   `json:"total_count"`
 }
 
-// ListOrgQueuedJobs fetches queued jobs for an organization.
-// Per live-probe, the Gitea API returns job labels as an array of strings.
-func (c *Client) ListOrgQueuedJobs(ctx context.Context, org string) ([]Job, int, error) {
-	url := fmt.Sprintf("%s/api/v1/orgs/%s/actions/jobs?status=queued&limit=100", c.baseURL, org)
+// jobsPageSize is Gitea's default MAX_RESPONSE_ITEMS; Gitea silently caps a larger limit,
+// so paging stops on total_count or an empty page, never on page arithmetic.
+const jobsPageSize = 50
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, 0, err
+// jobsMaxPages bounds one listing at 1000 jobs.
+const jobsMaxPages = 20
+
+// ListOrgJobs lists an org's jobs in any of the given statuses, reading every page.
+// Statuses in one call come from one query, so a job moving from queued to in_progress
+// appears exactly once. Pages have no defined order and can shift while being read, so
+// jobs are deduplicated by ID and the result is best effort once past one page. The
+// returned total is Gitea's count; fewer jobs than that means the listing is partial.
+func (c *Client) ListOrgJobs(ctx context.Context, org string, statuses ...string) ([]Job, int, error) {
+	q := url.Values{}
+	for _, s := range statuses {
+		q.Add("status", s)
 	}
+	q.Set("limit", fmt.Sprint(jobsPageSize))
 
-	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, 0, err
+	seen := map[int64]bool{}
+	var jobs []Job
+	total := 0
+	for page := 1; page <= jobsMaxPages; page++ {
+		q.Set("page", fmt.Sprint(page))
+		result, err := c.listOrgJobsPage(ctx, fmt.Sprintf("%s/api/v1/orgs/%s/actions/jobs?%s", c.baseURL, org, q.Encode()))
+		if err != nil {
+			return nil, 0, err
+		}
+		total = result.TotalCount
+		for _, j := range result.Jobs {
+			if !seen[j.ID] {
+				seen[j.ID] = true
+				jobs = append(jobs, j)
+			}
+		}
+		if len(result.Jobs) == 0 || len(seen) >= result.TotalCount {
+			break
+		}
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, 0, fmt.Errorf("list queued jobs failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	// Read X-Total-Count header for fast queue depth.
-	totalCount := 0
-	if xTotalCount := resp.Header.Get("X-Total-Count"); xTotalCount != "" {
-		_, _ = fmt.Sscanf(xTotalCount, "%d", &totalCount) // #nosec G104 - Sscanf error is benign (use 0 as default)
-	}
-
-	var result ListOrgQueuedJobsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse jobs response: %w", err)
-	}
-
-	return result.Jobs, totalCount, nil
+	return jobs, total, nil
 }
 
-// ListOrgInProgressJobsResponse is the API response for in-progress jobs.
-type ListOrgInProgressJobsResponse struct {
-	Jobs []Job `json:"jobs"`
-}
-
-// ListOrgInProgressJobs fetches the org's currently in-progress jobs (ADR 0008:
-// job-log liveness). One org-scoped call surfaces every running job's Gitea job URL
-// (used to build the /logs URL) and its claiming runner_id/runner_name, avoiding a
-// per-repo enumeration to find which job a given EphemeralRunner claimed.
-func (c *Client) ListOrgInProgressJobs(ctx context.Context, org string) ([]Job, error) {
-	url := fmt.Sprintf("%s/api/v1/orgs/%s/actions/jobs?status=in_progress&limit=100", c.baseURL, org)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+func (c *Client) listOrgJobsPage(ctx context.Context, pageURL string) (*ListOrgJobsResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", pageURL, nil)
 	if err != nil {
 		return nil, err
 	}
-
 	req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
 	req.Header.Set("Accept", "application/json")
 
@@ -215,15 +206,13 @@ func (c *Client) ListOrgInProgressJobs(ctx context.Context, org string) ([]Job, 
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("list in-progress jobs failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("list jobs failed with status %d: %s", resp.StatusCode, string(body))
 	}
-
-	var result ListOrgInProgressJobsResponse
+	var result ListOrgJobsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to parse in-progress jobs response: %w", err)
+		return nil, fmt.Errorf("failed to parse jobs response: %w", err)
 	}
-
-	return result.Jobs, nil
+	return &result, nil
 }
 
 // JobLogSize returns the Content-Length of a job's log download (jobURL + "/logs"),
