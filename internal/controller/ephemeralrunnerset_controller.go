@@ -126,8 +126,10 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// can never leave a stale count.
 	r.recordFleetMetrics(ers, grs, ownedRunners)
 
-	// Scale up: create missing EphemeralRunners.
-	if currentCount < desiredCount {
+	// Scale up: create missing EphemeralRunners, once per listener PatchID. Replicas
+	// count busy runners, so without this a runner that finishes before the next poll is
+	// replaced by one no job is waiting for.
+	if currentCount < desiredCount && ers.Spec.PatchID != ers.Status.LastReconcilePatchID {
 		// A template that cannot become a pod would leave every new runner without one.
 		if _, err := decodeRunnerTemplate(grs.Spec.Template); err != nil {
 			log.Error(err, "not creating runners: GiteaRunnerSet pod template is invalid", "name", grs.Name)
@@ -152,6 +154,17 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{Requeue: true}, nil
 		}
 
+		// Claim the PatchID before creating. The write fails on a stale copy of the set,
+		// so a reconcile that has not yet seen the runners just created cannot add more.
+		ers.Status.LastReconcilePatchID = ers.Spec.PatchID
+		if err := r.Status().Update(ctx, ers); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			log.Error(err, "failed to claim PatchID for scale-up")
+			return ctrl.Result{}, err
+		}
+
 		for i := currentCount; i < desiredCount; i++ {
 			// Fetch a fresh registration token for this runner.
 			var regToken string
@@ -165,7 +178,7 @@ func (r *EphemeralRunnerSetReconciler) Reconcile(ctx context.Context, req ctrl.R
 				}
 			}
 
-			runner := r.constructEphemeralRunner(grs, ers.Name, int(i), regToken)
+			runner := r.constructEphemeralRunner(grs, ers.Name, regToken)
 			if err := controllerutil.SetControllerReference(ers, runner, r.Scheme); err != nil {
 				log.Error(err, "failed to set owner reference on EphemeralRunner")
 				return ctrl.Result{}, err
@@ -401,16 +414,14 @@ func (r *EphemeralRunnerSetReconciler) recordFleetMetrics(ers *giteaactionsv1alp
 func (r *EphemeralRunnerSetReconciler) constructEphemeralRunner(
 	grs *giteaactionsv1alpha1.GiteaRunnerSet,
 	ersName string,
-	index int,
 	regToken string,
 ) *giteaactionsv1alpha1.EphemeralRunner {
-	// Generate a unique name: {gitearunnerset-name}-runner-{index}
-	name := fmt.Sprintf("%s-runner-%d", ersName, index)
-
+	// A name is never reused: Gitea keeps runner_name on a killed job for up to 15
+	// minutes, and a reused name would match that job and the old pod and Secret.
 	runner := &giteaactionsv1alpha1.EphemeralRunner{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: grs.Namespace,
+			GenerateName: ersName + "-runner-",
+			Namespace:    grs.Namespace,
 		},
 		Spec: giteaactionsv1alpha1.EphemeralRunnerSpec{
 			GiteaConfigURL:        grs.Spec.GiteaConfigURL,

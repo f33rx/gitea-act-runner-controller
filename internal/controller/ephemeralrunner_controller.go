@@ -18,8 +18,11 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -249,6 +252,17 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 	if timedOut, reason := r.checkTimeout(latest); timedOut {
+		idle := latest.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerRunning && latest.Status.JobRef == ""
+		if idle {
+			within, err := r.withinBaseline(ctx, latest)
+			if err != nil {
+				log.Error(err, "cannot evaluate minRunners baseline; keeping idle runner", "runner", latest.Name)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			if within {
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+		}
 		log.Info("runner timed out, deleting", "runner", latest.Name, "reason", reason)
 		// ADR 0010: counted by which checkTimeout branch fired, using the same
 		// phase discriminator checkTimeout itself switches on. The runner is deleted
@@ -341,18 +355,16 @@ func (r *EphemeralRunnerReconciler) recordLogProgress(ctx context.Context, runne
 		return fmt.Errorf("build Gitea client: %w", err)
 	}
 
-	jobs, err := giteaClient.ListOrgInProgressJobs(ctx, runner.Spec.OrgName)
+	jobs, _, err := giteaClient.ListOrgJobs(ctx, runner.Spec.OrgName, "in_progress")
 	if err != nil {
 		return fmt.Errorf("list in-progress jobs: %w", err)
 	}
 
 	// act_runner registers under the EphemeralRunner name (constructPod pins
 	// GITEA_RUNNER_NAME), and Status.RunnerID is never populated, so the name is the
-	// reliable key. Names are reused across generations and a job whose runner was torn
-	// down stays in_progress until Gitea's zombie reaper runs, so among name matches take
-	// the most recently started one. Parse rather than compare strings: Gitea renders
-	// started_at in its configured UI timezone, whose numeric offset shifts across DST,
-	// and lexical order inverts at the transition.
+	// reliable key. A recreated pod keeps the name, and a job whose pod was killed stays
+	// in_progress until Gitea's zombie reaper runs, so among name matches take the most
+	// recently started one.
 	var jobURL string
 	var jobStartedAt time.Time
 	for _, job := range jobs {
@@ -718,6 +730,94 @@ func podDisruption(pod *corev1.Pod) string {
 		}
 	}
 	return ""
+}
+
+// baselineMaxIdle bounds how long an idle runner is kept as the minRunners baseline, so
+// one that can no longer claim a job (for example its registration was removed) is
+// eventually replaced.
+const baselineMaxIdle = time.Hour
+
+// withinBaseline reports whether the runner's set has no more idle runners than its
+// minRunners, in which case an idle runner is the baseline the set asked for and is
+// kept rather than recycled. A sibling is busy if Gitea shows it running a job, the
+// listener's rule, or it has recorded one; JobRef alone lags the claim. A runner built
+// from an outdated spec, or idle past baselineMaxIdle or half its pod deadline, is not
+// kept: the listener replaces it with a fresh one.
+func (r *EphemeralRunnerReconciler) withinBaseline(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner) (bool, error) {
+	grs := &giteaactionsv1alpha1.GiteaRunnerSet{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: runner.Namespace, Name: runner.Spec.GiteaRunnerSetName}, grs); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if grs.Spec.MinRunners <= 0 || !matchesSetSpec(runner, grs) {
+		return false, nil
+	}
+	maxIdle := baselineMaxIdle
+	if d := runner.Spec.ActiveDeadlineSeconds; d != nil && *d > 0 {
+		maxIdle = min(maxIdle, time.Duration(*d)*time.Second/2)
+	}
+	if runner.Status.PhaseStartTime != nil && time.Since(runner.Status.PhaseStartTime.Time) >= maxIdle {
+		return false, nil
+	}
+
+	giteaClient, err := r.giteaClientForRunner(ctx, runner)
+	if err != nil {
+		return false, fmt.Errorf("build Gitea client: %w", err)
+	}
+	jobs, _, err := giteaClient.ListOrgJobs(ctx, runner.Spec.OrgName, "in_progress")
+	if err != nil {
+		return false, fmt.Errorf("list in-progress jobs: %w", err)
+	}
+	active := make(map[string]bool, len(jobs))
+	for _, job := range jobs {
+		active[job.RunnerName] = true
+	}
+
+	runners := &giteaactionsv1alpha1.EphemeralRunnerList{}
+	if err := r.List(ctx, runners, client.InNamespace(runner.Namespace)); err != nil {
+		return false, err
+	}
+	var idle int32
+	for i := range runners.Items {
+		rr := &runners.Items[i]
+		finished := rr.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerSucceeded ||
+			rr.Status.Phase == giteaactionsv1alpha1.EphemeralRunnerFailed
+		if rr.Spec.GiteaRunnerSetName == runner.Spec.GiteaRunnerSetName &&
+			rr.DeletionTimestamp.IsZero() && !finished && rr.Status.JobRef == "" && !active[rr.Name] {
+			idle++
+		}
+	}
+	return idle <= grs.Spec.MinRunners, nil
+}
+
+// matchesSetSpec reports whether a runner was built from its set's current Gitea target,
+// labels and pod template. A runner that differs cannot serve the set's queued jobs.
+func matchesSetSpec(runner *giteaactionsv1alpha1.EphemeralRunner, grs *giteaactionsv1alpha1.GiteaRunnerSet) bool {
+	if runner.Spec.GiteaConfigURL != grs.Spec.GiteaConfigURL || runner.Spec.OrgName != grs.Spec.OrgName {
+		return false
+	}
+	have, want := slices.Clone(runner.Spec.Labels), slices.Clone(grs.Spec.Labels)
+	slices.Sort(have)
+	slices.Sort(want)
+	if !slices.Equal(have, want) {
+		return false
+	}
+	return sameJSON(runner.Spec.Template, grs.Spec.Template)
+}
+
+// sameJSON compares two raw JSON documents by content, since the API server may
+// re-serialize them with a different key order.
+func sameJSON(a, b *runtime.RawExtension) bool {
+	if a == nil || len(a.Raw) == 0 || b == nil || len(b.Raw) == 0 {
+		return (a == nil || len(a.Raw) == 0) == (b == nil || len(b.Raw) == 0)
+	}
+	var av, bv any
+	if json.Unmarshal(a.Raw, &av) != nil || json.Unmarshal(b.Raw, &bv) != nil {
+		return false
+	}
+	return reflect.DeepEqual(av, bv)
 }
 
 // classifyFinishedPod decides a finished runner's outcome. act_runner exits 0 after

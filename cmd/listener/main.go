@@ -52,7 +52,7 @@ func main() {
 	var watchNamespaces string
 	flag.DurationVar(&pollInterval, "poll-interval", 10*time.Second, "Interval to poll Gitea for queued jobs")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
-		"Comma-separated namespaces to cache GiteaRunnerSets/EphemeralRunnerSets/Secrets in. Required "+
+		"Comma-separated namespaces to cache GiteaRunnerSets/EphemeralRunnerSets/EphemeralRunners/Secrets in. Required "+
 			"under namespace-scoped RBAC; the default cluster-wide cache cannot sync with only a Role. "+
 			"Empty = all namespaces.")
 	opts := zap.Options{
@@ -139,46 +139,70 @@ func (l *Listener) syncDemand(ctx context.Context) error {
 		return err
 	}
 
+	// Jobs are fetched once per org, and each queued job is counted toward one set.
+	sources := map[demandSource][]giteaactionsv1alpha1.GiteaRunnerSet{}
+	var order []demandSource
 	for _, rs := range runnerSets.Items {
 		// Only handle org-scoped runner sets for now.
 		if rs.Spec.RunnerScope != "org" {
 			continue
 		}
-
-		// Get the Gitea credential Secret.
-		credSecret := &corev1.Secret{}
-		credKey := client.ObjectKey{
-			Namespace: rs.Namespace,
-			Name:      rs.Spec.GiteaConfigSecretRef.Name,
+		src := demandSource{rs.Spec.GiteaConfigURL, rs.Spec.OrgName}
+		if _, seen := sources[src]; !seen {
+			order = append(order, src)
 		}
-		if err := l.client.Get(ctx, credKey, credSecret); err != nil {
-			log.Error(err, "failed to get Gitea credential secret", "secret", credKey)
+		sources[src] = append(sources[src], rs)
+	}
+	type orgQueue struct {
+		waiting []gitea.Job
+		active  map[string]bool
+	}
+	polled := map[demandSource]orgQueue{}
+	for _, src := range order {
+		jobs, ok := l.orgJobs(ctx, src, sources[src])
+		if !ok {
+			continue
+		}
+		q := orgQueue{active: map[string]bool{}}
+		for _, job := range jobs {
+			switch job.Status {
+			case "queued":
+				q.waiting = append(q.waiting, job)
+			case "in_progress":
+				q.active[job.RunnerName] = true
+			}
+		}
+		polled[src] = q
+	}
+
+	// Listed after the jobs, so a runner created meanwhile counts as present and idle.
+	runners := &giteaactionsv1alpha1.EphemeralRunnerList{}
+	if err := l.client.List(ctx, runners); err != nil {
+		return err
+	}
+	queued := map[setKey]int{}
+	counts := map[setKey]setRunners{}
+	for src, q := range polled {
+		srcCounts := countRunners(runners.Items, sources[src], q.active)
+		for k, c := range srcCounts {
+			counts[k] = c
+		}
+		for k, n := range assignQueuedJobs(q.waiting, sources[src], srcCounts) {
+			queued[k] = n
+		}
+	}
+
+	for _, rs := range runnerSets.Items {
+		key := setKey{rs.Namespace, rs.Name}
+		c, polled := counts[key]
+		if !polled {
 			continue
 		}
 
-		token := string(credSecret.Data[rs.Spec.GiteaConfigSecretRef.Key])
-		if token == "" {
-			log.Error(nil, "empty token in Gitea credential secret", "secret", credKey)
-			continue
-		}
-
-		// Poll Gitea for queued jobs.
-		giteaClient := gitea.NewClient(rs.Spec.GiteaConfigURL, token)
-		jobs, totalCount, err := giteaClient.ListOrgQueuedJobs(ctx, rs.Spec.OrgName)
-		if err != nil {
-			log.Error(err, "failed to list queued jobs", "org", rs.Spec.OrgName)
-			continue
-		}
-
-		// Count jobs that match this runner set's labels.
-		matchingJobs := l.countMatchingJobs(jobs, rs.Spec.Labels)
-		log.V(1).Info("polled Gitea", "org", rs.Spec.OrgName, "totalQueued", totalCount,
-			"matchingJobs", matchingJobs, "labels", rs.Spec.Labels)
-
-		// Compute desired replica count: clamp matching jobs between min and max.
-		desiredCount := l.clamp(int32(matchingJobs), rs.Spec.MinRunners, rs.Spec.MaxRunners) // #nosec G115 - matchingJobs is bounded
+		desiredCount := desiredRunners(c, queued[key], rs.Spec)
 		log.V(1).Info("computed desired replica count", "name", rs.Name,
-			"desired", desiredCount, "min", rs.Spec.MinRunners, "max", rs.Spec.MaxRunners)
+			"desired", desiredCount, "runners", c.total, "occupied", c.occupied, "queued", queued[key],
+			"min", rs.Spec.MinRunners, "max", rs.Spec.MaxRunners)
 
 		// Get or create the EphemeralRunnerSet.
 		ers := &giteaactionsv1alpha1.EphemeralRunnerSet{}
@@ -213,8 +237,11 @@ func (l *Listener) syncDemand(ctx context.Context) error {
 		} else {
 			// Update the EphemeralRunnerSet replicas and patchID if needed. Sets created
 			// before the owner reference existed pick it up here.
+			// The set scales up only for a PatchID it has not acted on, so a runner that
+			// finished after the last poll is not replaced until demand is read again.
 			ownerAdded := ensureOwnedBy(ers, &rs)
-			if ers.Spec.Replicas != desiredCount || ers.Spec.PatchID == 0 || ownerAdded {
+			scaleUp := desiredCount > int32(c.total) // #nosec G115 - runner count is small
+			if ers.Spec.Replicas != desiredCount || ers.Spec.PatchID == 0 || ownerAdded || scaleUp {
 				ers.Spec.Replicas = desiredCount
 				ers.Spec.PatchID = patchIDInt
 				if err := l.client.Update(ctx, ers); err != nil {
@@ -234,6 +261,36 @@ func (l *Listener) syncDemand(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// orgJobs lists an org's queued and in-progress jobs using the first set whose
+// credential Secret is usable; the sets share the org, so any one of them can read it.
+func (l *Listener) orgJobs(ctx context.Context, src demandSource, sets []giteaactionsv1alpha1.GiteaRunnerSet) ([]gitea.Job, bool) {
+	log := ctrl.Log.WithName("listener")
+	for _, rs := range sets {
+		credSecret := &corev1.Secret{}
+		credKey := client.ObjectKey{Namespace: rs.Namespace, Name: rs.Spec.GiteaConfigSecretRef.Name}
+		if err := l.client.Get(ctx, credKey, credSecret); err != nil {
+			log.Error(err, "failed to get Gitea credential secret", "secret", credKey)
+			continue
+		}
+		token := string(credSecret.Data[rs.Spec.GiteaConfigSecretRef.Key])
+		if token == "" {
+			log.Error(nil, "empty token in Gitea credential secret", "secret", credKey)
+			continue
+		}
+		jobs, total, err := gitea.NewClient(src.url, token).ListOrgJobs(ctx, src.org, "queued", "in_progress")
+		if err != nil {
+			log.Error(err, "failed to list jobs", "org", src.org)
+			continue
+		}
+		if len(jobs) < total {
+			log.Info("job listing is partial; runner sets may be undersized", "org", src.org, "listed", len(jobs), "total", total)
+		}
+		log.V(1).Info("polled Gitea", "org", src.org, "jobs", len(jobs), "sets", len(sets))
+		return jobs, true
+	}
+	return nil, false
 }
 
 // ensureOwnedBy makes the GiteaRunnerSet the EphemeralRunnerSet's controller owner so
@@ -257,50 +314,6 @@ func ensureOwnedBy(ers *giteaactionsv1alpha1.EphemeralRunnerSet, rs *giteaaction
 		Controller: &isController,
 	})
 	return true
-}
-
-// countMatchingJobs counts how many jobs this runner set can serve.
-// Per ADR 0007: a job matches only if its runs-on labels are a SUBSET of the set's
-// labels (all-match), and each job is counted at most ONCE. A single runner claims
-// exactly one job, so the count is the number of distinct matching jobs.
-func (l *Listener) countMatchingJobs(jobs []gitea.Job, setLabels []string) int {
-	setLabelSet := make(map[string]struct{}, len(setLabels))
-	for _, sl := range setLabels {
-		setLabelSet[sl] = struct{}{}
-	}
-
-	count := 0
-	for _, job := range jobs {
-		if jobMatchesSet(job.Labels, setLabelSet) {
-			count++ // one runner per matching job
-		}
-	}
-	return count
-}
-
-// jobMatchesSet reports whether every one of the job's labels is provided by the set.
-// An empty job-label list does not match (a job with no runs-on cannot be scheduled here).
-func jobMatchesSet(jobLabels []string, setLabelSet map[string]struct{}) bool {
-	if len(jobLabels) == 0 {
-		return false
-	}
-	for _, jl := range jobLabels {
-		if _, ok := setLabelSet[jl]; !ok {
-			return false // job needs a label this set does not advertise
-		}
-	}
-	return true
-}
-
-// clamp returns value clamped between lo and hi.
-func (l *Listener) clamp(value, lo, hi int32) int32 {
-	if value < lo {
-		return lo
-	}
-	if value > hi {
-		return hi
-	}
-	return value
 }
 
 // generatePatchIDInt generates a monotonic patch ID for listener/controller coordination.

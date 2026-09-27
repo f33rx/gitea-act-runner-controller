@@ -53,7 +53,7 @@ const orgRunnersFixture = `{
 }`
 
 func TestDecodeQueuedJobsContract(t *testing.T) {
-	var got ListOrgQueuedJobsResponse
+	var got ListOrgJobsResponse
 	if err := json.Unmarshal([]byte(queuedJobsFixture), &got); err != nil {
 		t.Fatalf("decode failed: %v", err)
 	}
