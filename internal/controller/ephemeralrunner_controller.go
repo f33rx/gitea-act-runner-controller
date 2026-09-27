@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +31,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -89,6 +92,9 @@ type EphemeralRunnerReconciler struct {
 	RunnerImage string
 	// RunnerResources fills in resources the template's runner container leaves unset.
 	RunnerResources corev1.ResourceRequirements
+	// Recorder surfaces pod creation failures on the runner and its GiteaRunnerSet.
+	// Optional.
+	Recorder record.EventRecorder
 }
 
 func (r *EphemeralRunnerReconciler) runnerServiceAccountName() string {
@@ -154,8 +160,7 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				return ctrl.Result{}, err
 			}
 			if err := r.Create(ctx, secret); err != nil {
-				log.Error(err, "failed to create token Secret")
-				return ctrl.Result{}, err
+				return r.createFailed(ctx, runner, "token Secret", err)
 			}
 			log.Info("created token Secret", "secret", secretName)
 		} else {
@@ -175,16 +180,14 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			// Create the Pod.
 			pod, err = r.constructPod(ctx, runner, secret)
 			if err != nil {
-				log.Error(err, "failed to construct Pod")
-				return ctrl.Result{}, err
+				return r.createFailed(ctx, runner, "Pod", err)
 			}
 			if err := controllerutil.SetControllerReference(runner, pod, r.Scheme); err != nil {
 				log.Error(err, "failed to set controller reference on Pod")
 				return ctrl.Result{}, err
 			}
 			if err := r.Create(ctx, pod); err != nil {
-				log.Error(err, "failed to create Pod")
-				return ctrl.Result{}, err
+				return r.createFailed(ctx, runner, "Pod", err)
 			}
 			log.Info("created Pod", "pod", podName)
 			now := metav1.Now()
@@ -291,6 +294,73 @@ func (r *EphemeralRunnerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// createFailedRetry is how often a runner whose Pod or Secret cannot be created retries.
+const createFailedRetry = 30 * time.Second
+
+// createFailed handles a runner whose token Secret or Pod could not be built or was
+// rejected (admission, validation, quota). The runner is marked Pending with the error
+// as its reason, so the pending timeout recycles it, and the error is raised as an
+// Event on the runner and its GiteaRunnerSet. Creation is retried until then, since a
+// rejection such as an exhausted quota can clear.
+func (r *EphemeralRunnerReconciler) createFailed(ctx context.Context, runner *giteaactionsv1alpha1.EphemeralRunner, what string, cause error) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+	if apierrors.IsAlreadyExists(cause) {
+		// Created by an earlier reconcile the cache has not caught up with yet.
+		return ctrl.Result{Requeue: true}, nil
+	}
+	log.Error(cause, "cannot create runner "+what, "runner", runner.Name)
+
+	msg := fmt.Sprintf("%s rejected: %v", what, cause)
+	if len(msg) > 1024 {
+		msg = strings.ToValidUTF8(msg[:1024], "")
+	}
+	r.warn(runner, "CreateFailed", msg)
+	grs := &giteaactionsv1alpha1.GiteaRunnerSet{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: runner.Namespace, Name: runner.Spec.GiteaRunnerSetName}, grs); err == nil {
+		r.warn(grs, "CreateFailed", runner.Name+": "+msg)
+	}
+
+	latest := &giteaactionsv1alpha1.EphemeralRunner{}
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Get(ctx, types.NamespacedName{Namespace: runner.Namespace, Name: runner.Name}, latest); err != nil {
+			return err
+		}
+		now := metav1.Now()
+		if latest.Status.Phase == "" {
+			latest.Status.Phase = giteaactionsv1alpha1.EphemeralRunnerPending
+		}
+		// Set once: restarting the clock on every retry would keep the timeout from firing.
+		if latest.Status.PhaseStartTime == nil {
+			latest.Status.PhaseStartTime = &now
+		}
+		latest.Status.Reason = msg
+		latest.Status.LastObservedTime = &now
+		return r.Status().Update(ctx, latest)
+	}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		log.Error(err, "failed to record creation failure on runner status", "runner", runner.Name)
+		return ctrl.Result{}, err
+	}
+
+	if timedOut, reason := r.checkTimeout(latest); timedOut {
+		log.Info("runner timed out, deleting", "runner", latest.Name, "reason", reason)
+		metrics.RunnerPendingTimeoutTotal.WithLabelValues(latest.Spec.GiteaRunnerSetName, latest.Namespace).Inc()
+		if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{Requeue: true}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	return ctrl.Result{RequeueAfter: createFailedRetry}, nil
+}
+
+func (r *EphemeralRunnerReconciler) warn(obj runtime.Object, reason, msg string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(obj, corev1.EventTypeWarning, reason, msg)
+	}
 }
 
 // checkTimeout implements ADR 0008 Decisions 3-4: a Running runner whose container log
