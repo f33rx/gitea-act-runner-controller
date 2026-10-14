@@ -1,7 +1,7 @@
 # Default runner image for garc. act_runner runs every job in host mode inside this
-# container, so JavaScript actions need node here. Also carries git, python3, curl, jq,
-# sudo, unzip, xz and zstd; compilers and build-essential are left to setup-* actions
-# or a custom image.
+# container, so JavaScript actions need node here. Also carries build-essential (node-gyp
+# needs make and g++), git, python3, curl, jq, sudo, unzip, xz and zstd; language
+# toolchains are left to setup-* actions or a custom image.
 ARG ACT_RUNNER_VERSION=0.6.1
 ARG NODE_MAJOR=22
 
@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # libstdc++6 is what the copied node binary links against.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git gnupg jq libstdc++6 python3 sudo tini unzip \
+      bash build-essential ca-certificates curl git gnupg jq libstdc++6 python3 sudo tini unzip \
       xz-utils zstd \
  && rm -rf /var/lib/apt/lists/*
 
